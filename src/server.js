@@ -15,7 +15,9 @@ app.get('/', (req, res) => res.send('API is running'));
 app.use('/api/v1/auth', require('./routes/v1/authRoutes'));
 app.use('/api/v1/users', require('./routes/v1/userRoutes'));
 app.use('/api/v1/wallets', require('./routes/v1/walletRoutes')); // nếu có walletRoutes
-
+app.use("/api/v1/stations", require("./routes/v1/stationsRoutes"));
+app.use("/api/v1/connectors", require("./routes/v1/connectorsRoutes"));
+app.use("/api/v1/tariffs", require("./routes/v1/tariffsRoutes"));
 // 404 handler
 app.use((req, res) => res.status(404).send(`Cannot ${req.method} ${req.originalUrl}`));
 

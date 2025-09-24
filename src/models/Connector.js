@@ -1,0 +1,29 @@
+// src/models/Connector.js
+const mongoose = require("mongoose");
+const { CONNECTOR_STATUS } = require("../constants/enums");
+
+const ConnectorSchema = new mongoose.Schema(
+  {
+    stationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Station",
+      required: true,
+      index: true,
+    },
+    type: { type: String, required: true, trim: true }, // VD: DC, AC, CCS2
+    powerKw: { type: Number, required: false, min: 0, default: 0 },
+    status: {
+      type: String,
+      enum: CONNECTOR_STATUS,
+      required: true,
+      default: "IDLE",
+    },
+    code: { type: String, required: true, trim: true }, // unique trong station
+  },
+  { timestamps: true }
+);
+
+ConnectorSchema.index({ stationId: 1, code: 1 }, { unique: true });
+ConnectorSchema.index({ stationId: 1, status: 1 });
+
+module.exports = mongoose.model("Connector", ConnectorSchema);
