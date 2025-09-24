@@ -1,32 +1,23 @@
-/**
- * Updated by trungquandev.com's author on August 17 2023
- * YouTube: https://youtube.com/@trungquandev
- * "A bit of fragrance clings to the hand that gives flowers!"
- */
+const express = require('express');
+const connectDB = require('./config/mongodb');
+require('dotenv').config();
 
-import express from 'express'
-import { mapOrder } from '~/utils/sorts.js'
+const app = express();
+app.use(express.json());
 
-const app = express()
+// Connect DB
+connectDB();
 
-const hostname = 'localhost'
-const port = 8017
+// Root route
+app.get('/', (req, res) => res.send('API is running'));
 
-app.get('/', (req, res) => {
-  // Test Absolute import mapOrder
-  console.log(mapOrder(
-    [ { id: 'id-1', name: 'One' },
-      { id: 'id-2', name: 'Two' },
-      { id: 'id-3', name: 'Three' },
-      { id: 'id-4', name: 'Four' },
-      { id: 'id-5', name: 'Five' } ],
-    ['id-5', 'id-4', 'id-2', 'id-3', 'id-1'],
-    'id'
-  ))
-  res.end('<h1>Hello World!</h1><hr>')
-})
+// Mount routes
+app.use('/api/v1/auth', require('./routes/v1/authRoutes'));
+app.use('/api/v1/users', require('./routes/v1/userRoutes'));
+app.use('/api/v1/wallets', require('./routes/v1/walletRoutes')); // nếu có walletRoutes
 
-app.listen(port, hostname, () => {
-  // eslint-disable-next-line no-console
-  console.log(`Hello Trung Quan Dev, I am running at ${ hostname }:${ port }/`)
-})
+// 404 handler
+app.use((req, res) => res.status(404).send(`Cannot ${req.method} ${req.originalUrl}`));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
