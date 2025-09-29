@@ -1,3 +1,11 @@
+const BOOKING_STATUS = {
+  RESERVED: "RESERVED",
+  CHECKED_IN: "CHECKED_IN",
+  COMPLETED: "COMPLETED",
+  CANCELLED: "CANCELLED",
+  NO_SHOW: "NO_SHOW",
+};
+
 module.exports = {
   ROLES: {
     ADMIN: "admin",
@@ -7,4 +15,6 @@ module.exports = {
   STATION_STATUS: ["ONLINE", "OFFLINE", "MAINTENANCE"],
   CONNECTOR_STATUS: ["OFFLINE", "IDLE", "RESERVED", "CHARGING", "FINISHED"],
   TARIFF_MODE: ["energy", "time", "hybrid"],
+  BOOKING_STATUS,
+  BOOKING_STATUS_VALUES: Object.values(BOOKING_STATUS),
 };
