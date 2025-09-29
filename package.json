@@ -13,7 +13,8 @@
     "build-babel": "babel ./src -d ./build/src",
     "build": "npm run clean && npm run build-babel",
     "production": "npm run build && node ./build/src/server.js",
-    "dev": "nodemon --exec babel-node ./src/server.js"
+    "dev": "nodemon --exec babel-node ./src/server.js",
+    "seed:booking-test-data": "node scripts/seedBookingTestData.js"
   },
   "dependencies": {
     "@babel/runtime": "^7.22.10",
