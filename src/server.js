@@ -12,13 +12,16 @@ const app = express();
 connectDB();
 
 // PayOS webhook: PHẢI đặt TRƯỚC express.json()
-app.post('/api/v1/payments/payos/webhook',
+// PayOS webhook: phải đặt TRƯỚC express.json()
+app.all(
+  '/api/v1/payments/payos/webhook',
   express.raw({ type: '*/*' }),
   payment.payosWebhook
 );
 
 // Các route khác mới dùng JSON parser
 app.use(express.json());
+
 
 // Routes app
 app.use('/api/v1/auth', require('./routes/v1/authRoutes'));
