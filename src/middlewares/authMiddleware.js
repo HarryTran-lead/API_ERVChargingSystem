@@ -2,39 +2,68 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
-const protect = (roles = []) => {
+function normalizeSecret(raw) {
+  return String(raw || '').replace(/\r?\n/g, '').trim(); // tránh \n cuối dòng của .env
+}
+
+// Cho phép cấu hình thuật toán qua ENV, mặc định mở HS256 & HS512
+function getAllowedAlgs() {
+  const env = process.env.JWT_ALGS || 'HS256,HS512';
+  return env.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+exports.protect = (roles = []) => {
+  const allow = Array.isArray(roles) ? roles : [roles].filter(Boolean);
+
   return async (req, res, next) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      const auth = req.headers.authorization || '';
+      // chấp nhận chữ hoa/thường “Bearer”
+      if (!/^bearer\s+/i.test(auth)) {
         return res.status(401).json({ msg: 'No token provided' });
       }
 
-      const token = authHeader.split(' ')[1];
-      const decoded = jwt.verify(token, process.env.JWT_SECRET); // { id, role }
+      const token = auth.replace(/^bearer\s+/i, '').trim();
+      if (!token) return res.status(401).json({ msg: 'No token provided' });
 
-      // Lấy thông tin user từ DB
-      const user = await User.findOne({ id: decoded.id });
-      if (!user) return res.status(401).json({ msg: 'User not found' });
+      const secret = normalizeSecret(process.env.JWT_SECRET);
+      if (!secret) return res.status(500).json({ msg: 'Server auth misconfigured' });
 
-      // Kiểm tra status
-      if (user.status !== 'ACTIVE') {
-        return res.status(403).json({ msg: 'User is not active' });
+      let payload;
+      try {
+        payload = jwt.verify(token, secret, {
+          algorithms: getAllowedAlgs(), // bắt buộc đúng alg (HS256/HS512…)
+          clockTolerance: 60,           // nới clock skew 60s cho dev
+        });
+      } catch (e) {
+        const msg =
+          e.name === 'TokenExpiredError' ? 'Token expired' :
+          e.name === 'JsonWebTokenError' ? 'Invalid token' :
+          'Invalid token';
+        return res.status(401).json({ msg });
       }
 
-      // Kiểm tra roles nếu truyền vào
-      if (roles.length && !roles.includes(user.role)) {
+      // BẮT BUỘC có claim id dạng string (UUID app bạn đang dùng)
+      if (!payload || typeof payload.id !== 'string' || !payload.id) {
+        return res.status(401).json({ msg: 'Token missing id claim' });
+      }
+
+      // Lấy user theo field "id" (không phải _id)
+      const user = await User.findOne({ id: payload.id }).select('id role status');
+      if (!user) return res.status(401).json({ msg: 'User not found' });
+      if (user.status !== 'ACTIVE') return res.status(403).json({ msg: 'User is not active' });
+
+      // Kiểm tra role nếu được yêu cầu
+      if (allow.length && !allow.includes(user.role)) {
         return res.status(403).json({ msg: 'Forbidden: insufficient role' });
       }
 
-      req.user = user; // lưu thông tin user đầy đủ vào req
-      next();
+      // Gắn thông tin tối thiểu vào req
+      req.user = { id: user.id, role: user.role };
+      return next();
     } catch (err) {
-      console.error('Auth error:', err.message);
-      return res.status(401).json({ msg: 'Invalid or expired token' });
+      console.error('[protect] error:', err);
+      return res.status(500).json({ msg: 'Auth error' });
     }
   };
 };
-
-// Export dưới dạng object để có thể destructure
-module.exports = { protect };

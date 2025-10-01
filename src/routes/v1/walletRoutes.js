@@ -6,6 +6,5 @@ const walletController = require('../../controllers/walletController');
 const paymentController = require('../../controllers/paymentController');
 
 router.get('/me', protect(), walletController.getMyWallet);
-router.post('/payments/topup', protect(), paymentController.topUp);
 
 module.exports = router;
