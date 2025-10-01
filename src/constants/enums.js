@@ -5,7 +5,12 @@ const BOOKING_STATUS = {
   CANCELLED: "CANCELLED",
   NO_SHOW: "NO_SHOW",
 };
-
+const SESSION_STATUS = {
+  PENDING: "PENDING",
+  CHARGING: "CHARGING",
+  COMPLETED: "COMPLETED",
+  STOPPED: "STOPPED",
+};
 module.exports = {
   ROLES: {
     ADMIN: "admin",
@@ -17,4 +22,6 @@ module.exports = {
   TARIFF_MODE: ["energy", "time", "hybrid"],
   BOOKING_STATUS,
   BOOKING_STATUS_VALUES: Object.values(BOOKING_STATUS),
+  SESSION_STATUS,
+  SESSION_STATUS_VALUES: Object.values(SESSION_STATUS),
 };
