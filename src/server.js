@@ -13,7 +13,7 @@ connectDB();
 
 // PayOS webhook: PHẢI đặt TRƯỚC express.json()
 app.post('/api/v1/payments/payos/webhook',
-  express.raw({ type: 'application/json' }),
+  express.raw({ type: '*/*' }),
   payment.payosWebhook
 );
 
