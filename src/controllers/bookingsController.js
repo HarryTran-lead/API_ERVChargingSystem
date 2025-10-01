@@ -1,13 +1,12 @@
 const mongoose = require("mongoose");
 const Booking = require("../models/Booking");
 const Connector = require("../models/Connector");
-const Wallet = require("../models/Wallet");
 const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
+const { ensureRequestUserId } = require("../utils/requestUser");
 const {
   BOOKING_SLOT_MINUTES,
   BOOKING_GRACE_MINUTES,
-  BOOKING_MIN_WALLET_BALANCE,
 } = require("../constants/business");
 const { BOOKING_STATUS } = require("../constants/enums");
 const {
@@ -17,47 +16,13 @@ const {
 
 const toMinutes = (ms) => ms / (60 * 1000);
 
-const ensureAuthenticatedDriver = (req) => {
-  const user = req.user;
-
-  if (!user) {
-    throw new HttpError(401, "Authentication required");
-  }
-
-  const plain =
-    typeof user.toObject === "function"
-      ? user.toObject()
-      : typeof user.toJSON === "function"
-      ? user.toJSON()
-      : user;
-
-  const explicitId = user.id || user.user_id || plain?.id || plain?.user_id;
-
-  if (!explicitId) {
-    throw new HttpError(401, "Authenticated user identifier is missing");
-  }
-
-  return explicitId;
-};
-
 exports.createBooking = asyncHandler(async (req, res) => {
   const { connectorId, slotStart } = req.body;
   if (!connectorId || !slotStart) {
     throw new HttpError(400, "connectorId and slotStart are required");
   }
 
-  const userId = ensureAuthenticatedDriver(req);
-
-  const wallet = await Wallet.findOne({ user_id: userId });
-  if (!wallet) {
-    throw new HttpError(400, "Wallet not found for user");
-  }
-  if (wallet.balance < BOOKING_MIN_WALLET_BALANCE) {
-    throw new HttpError(
-      402,
-      `Insufficient wallet balance. At least ${BOOKING_MIN_WALLET_BALANCE.toLocaleString()} VND is required to book.`
-    );
-  }
+  const userId = ensureRequestUserId(req);
 
   const start = new Date(slotStart);
   if (Number.isNaN(start.getTime())) {
@@ -153,8 +118,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
 });
 
 exports.getMyBookings = asyncHandler(async (req, res) => {
-  const userId = ensureAuthenticatedDriver(req);
-
+  const userId = ensureRequestUserId(req);
   const bookings = await Booking.find({ userId })
     .sort({ slotStart: -1 })
     .lean();
@@ -164,9 +128,7 @@ exports.getMyBookings = asyncHandler(async (req, res) => {
 
 exports.cancelBooking = asyncHandler(async (req, res) => {
   const { id } = req.params;
-
-  const userId = ensureAuthenticatedDriver(req);
-
+  const userId = ensureRequestUserId(req);
   const query = { userId, $or: [{ id }] };
   if (mongoose.Types.ObjectId.isValid(id)) {
     query.$or.push({ _id: id });
