@@ -23,8 +23,9 @@ app.use('/api/v1/connectors', require('./routes/v1/connectorsRoutes'));
 app.use('/api/v1/wallets', require('./routes/v1/walletRoutes'));
 app.use('/api/v1/tariffs', require('./routes/v1/tariffsRoutes'));
 app.use('/api/v1/payments', require('./routes/v1/paymentRoutes')); // KHÔNG khai báo webhook ở file routes nữa
-
+app.use("/api/v1/bookings", require("./routes/v1/bookingsRoutes"));
 // 404
+
 app.use((req, res) => res.status(404).send(`Cannot ${req.method} ${req.originalUrl}`));
 
 const PORT = process.env.PORT || 5000;
