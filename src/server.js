@@ -5,8 +5,12 @@ const connectDB = require('./config/mongodb');
 const errorHandler = require('./middlewares/errorHandler');
 const payment = require('./controllers/paymentController');
 
+
 const app = express();
 connectDB();
+
+// Sử dụng middleware CORS
+app.use(require('./config/cors'));
 
 app.post('/api/v1/payments/payos/webhook',
   express.raw({ type: '*/*' }),   // <-- nên để * / *
