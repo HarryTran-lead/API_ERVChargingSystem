@@ -26,6 +26,7 @@ app.use('/api/v1/tariffs', require('./routes/v1/tariffsRoutes'));
 app.use('/api/v1/payments', require('./routes/v1/paymentRoutes')); // KHÔNG định nghĩa /payos/webhook trong file này
 app.use('/api/v1/bookings', require('./routes/v1/bookingsRoutes'));
 app.use('/api/v1/sessions', require('./routes/v1/sessionsRoutes'));
+app.use("/api/v1/vehicles", require("./routes/v1/vehiclesRoutes"));
 
 // 404 cuối cùng
 app.use((req, res) => {

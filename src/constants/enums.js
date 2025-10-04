@@ -11,6 +11,8 @@ const SESSION_STATUS = {
   COMPLETED: "COMPLETED",
   STOPPED: "STOPPED",
 };
+const VEHICLE_PLUG_TYPES = ["CCS2", "CHAdeMO", "AC_Type2", "GB/T", "Other"];
+
 module.exports = {
   ROLES: {
     ADMIN: "admin",
@@ -24,4 +26,5 @@ module.exports = {
   BOOKING_STATUS_VALUES: Object.values(BOOKING_STATUS),
   SESSION_STATUS,
   SESSION_STATUS_VALUES: Object.values(SESSION_STATUS),
+  VEHICLE_PLUG_TYPES,
 };
