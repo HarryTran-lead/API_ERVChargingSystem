@@ -1,6 +1,7 @@
 const Connector = require("../models/Connector");
 const Station = require("../models/Station");
 const Booking = require("../models/Booking");
+const Charger = require("../models/Charger");
 const Session = require("../models/Session");
 const User = require("../models/User");
 const Vehicle = require("../models/Vehicle");
@@ -8,16 +9,36 @@ const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
 const { ensureRequestUserId } = require("../utils/requestUser");
 const { BOOKING_STATUS } = require("../constants/enums");
-const { BOOKING_SLOT_MINUTES } = require("../constants/business");
+const {
+  BOOKING_SLOT_MINUTES,
+  MAX_CONNECTORS_PER_CHARGER,
+} = require("../constants/business");
 
 exports.createConnector = asyncHandler(async (req, res) => {
-  const { stationId, type, powerKw, status, code } = req.body;
-  // validate station
-  const st = await Station.findById(stationId).select("_id").lean();
-  if (!st) throw new HttpError(400, "Invalid stationId");
+  const { chargerId, type, powerKw, status, code } = req.body;
+  const charger = await Charger.findById(chargerId)
+    .select("_id stationId")
+    .lean();
+  if (!charger) {
+    throw new HttpError(400, "Invalid chargerId");
+  }
+
+  const st = await Station.findById(charger.stationId).select("_id").lean();
+  if (!st) {
+    throw new HttpError(409, "Charger is linked to an invalid station");
+  }
+
+  const connectorCount = await Connector.countDocuments({ chargerId });
+  if (connectorCount >= MAX_CONNECTORS_PER_CHARGER) {
+    throw new HttpError(
+      409,
+      `Charger already has ${MAX_CONNECTORS_PER_CHARGER} connectors`
+    );
+  }
 
   const c = await Connector.create({
-    stationId,
+    stationId: charger.stationId,
+    chargerId,
     type,
     powerKw,
     status: status || "IDLE",
@@ -27,9 +48,10 @@ exports.createConnector = asyncHandler(async (req, res) => {
 });
 
 exports.listConnectors = asyncHandler(async (req, res) => {
-  const { stationId, status, page = 1, limit = 20 } = req.query;
+  const { stationId, chargerId, status, page = 1, limit = 20 } = req.query;
   const q = {};
   if (stationId) q.stationId = stationId;
+  if (chargerId) q.chargerId = chargerId;
   if (status) q.status = status;
 
   const docs = await Connector.find(q)
@@ -111,6 +133,7 @@ const buildQrPayload = (token) => {
 const formatConnectorForScan = (connectorDoc) => {
   const connector = toPlain(connectorDoc);
   const station = connector.stationId;
+  const charger = connector.chargerId;
 
   const stationPayload = station
     ? {
@@ -124,7 +147,17 @@ const formatConnectorForScan = (connectorDoc) => {
         status: station.status,
       }
     : undefined;
-
+      const chargerPayload = charger
+        ? {
+            id:
+              typeof charger._id !== "undefined"
+                ? charger._id.toString()
+                : charger?.toString?.() || undefined,
+            name: charger.name,
+            code: charger.code,
+            status: charger.status,
+          }
+        : undefined;
   return {
     id: connector._id?.toString(),
     code: connector.code,
@@ -132,6 +165,7 @@ const formatConnectorForScan = (connectorDoc) => {
     powerKw: connector.powerKw,
     status: connector.status,
     station: stationPayload,
+    charger: chargerPayload,
     qr: buildQrPayload(connector.qrToken),
   };
 };
@@ -191,6 +225,7 @@ exports.getConnectorScanDetails = asyncHandler(async (req, res) => {
 
   const connector = await Connector.findOne({ qrToken: token })
     .populate("stationId", "name lat lng status")
+    .populate("chargerId", "name code status stationId")
     .lean();
 
   if (!connector) {

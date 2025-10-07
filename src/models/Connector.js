@@ -11,6 +11,12 @@ const ConnectorSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    chargerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Charger",
+      required: true,
+      index: true,
+    },
     type: { type: String, required: true, trim: true }, // VD: DC, AC, CCS2
     powerKw: { type: Number, required: false, min: 0, default: 0 },
     status: {
@@ -25,7 +31,8 @@ const ConnectorSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-ConnectorSchema.index({ stationId: 1, code: 1 }, { unique: true });
+ConnectorSchema.index({ chargerId: 1, code: 1 }, { unique: true });
+ConnectorSchema.index({ chargerId: 1, status: 1 });
 ConnectorSchema.index({ stationId: 1, status: 1 });
 ConnectorSchema.index({ qrToken: 1 }, { unique: true });
 

@@ -66,7 +66,7 @@ async function initiateTopUpPayOS(req, res) {
       PAYOS_RETURN_URL, PAYOS_CANCEL_URL
     } = process.env;
 
-    // Kiểm tra ENV
+    // Kiểm tra ENV (tránh gửi thiếu thông tin)
     const missing = [];
     if (!PAYOS_CLIENT_ID)    missing.push('PAYOS_CLIENT_ID');
     if (!PAYOS_API_KEY)      missing.push('PAYOS_API_KEY');
@@ -81,19 +81,19 @@ async function initiateTopUpPayOS(req, res) {
       return res.status(400).json({ msg: 'Invalid amount (>= 1000)' });
     }
 
-    // orderCode: 6 chữ số
+    // orderCode: 6 chữ số (đúng sample PayOS), kiểu number
     const orderCode = Number(String(Date.now()).slice(-6));
 
-    // 2 URL phải nằm trong whitelist PayOS
+    // LƯU Ý: 2 URL này phải nằm trong whitelist trên Dashboard PayOS (đúng scheme/host/port)
     const payload = {
-      orderCode,
-      amount,
-      description: 'Topup',
+      orderCode,            // number
+      amount,               // number
+      description: 'Topup', // string
       returnUrl: PAYOS_RETURN_URL,
       cancelUrl: PAYOS_CANCEL_URL
     };
 
-    // Ký HMAC SHA256 (signature nằm trong BODY)
+    // Ký HMAC SHA256 trên chuỗi key=val&... (đã sort) — signature đặt TRONG BODY
     const signString = toSignString(payload);
     const signature = crypto
       .createHmac('sha256', (PAYOS_CHECKSUM_KEY || '').trim())
@@ -107,7 +107,7 @@ async function initiateTopUpPayOS(req, res) {
     console.log('[PayOS/init] headers idLen=%d keyLen=%d',
       (PAYOS_CLIENT_ID || '').trim().length, (PAYOS_API_KEY || '').trim().length);
 
-    // Gọi API
+    // Gọi API (signature trong body; header chỉ cần client-id và api-key)
     const { data } = await axios.post(
       'https://api-merchant.payos.vn/v2/payment-requests',
       body,
@@ -120,7 +120,7 @@ async function initiateTopUpPayOS(req, res) {
       }
     );
 
-    // Lưu phiên
+    // Lưu phiên sau khi PayOS nhận OK
     const w = await Wallet.findOne({ user_id: req.user.id });
     await PaymentSession.create({
       kind: 'TOPUP',
@@ -144,56 +144,25 @@ async function initiateTopUpPayOS(req, res) {
 /* =========================
  * PayOS — WEBHOOK
  * ========================= */
-
-// So sánh chữ ký an toàn
-function timingSafeEq(a, b) {
-  const A = Buffer.from(a || '', 'utf8');
-  const B = Buffer.from(b || '', 'utf8');
-  if (A.length !== B.length) return false;
-  return crypto.timingSafeEqual(A, B);
-}
-
 async function payosWebhook(req, res) {
   try {
-    // Lấy chữ ký (nhiều tên header có thể được dùng)
-    const sig =
-      req.get('x-payos-signature') ||
-      req.get('x-signature') ||
-      req.get('x-checksum') ||
-      '';
+    // Phải có middleware raw trước route này:
+    // app.use('/api/v1/payments/payos/webhook', express.raw({ type: 'application/json' }));
+    const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (req.body || '');
+    const sigHeader = String(req.headers['x-payos-signature'] || req.headers['x-signature'] || '');
+    const expected  = crypto.createHmac('sha256', (process.env.PAYOS_CHECKSUM_KEY || '').trim())
+                            .update(rawBody).digest('hex');
 
-    // Luôn tạo Buffer thô để ký HMAC
-    const rawBuf = Buffer.isBuffer(req.body)
-      ? req.body
-      : Buffer.from(JSON.stringify(req.body || {}), 'utf8');
+    if (sigHeader !== expected) return res.status(400).send('INVALID');
 
-    // Cho phép ping (GET/HEAD hoặc POST không có chữ ký) → 200
-    if (req.method !== 'POST' || !sig) {
-      console.log('[PayOS webhook] ping', { method: req.method, hasSig: Boolean(sig), len: rawBuf.length });
-      return res.status(200).send('OK');
-    }
-
-    // Verify chữ ký
-    const expected = crypto
-      .createHmac('sha256', (process.env.PAYOS_CHECKSUM_KEY || '').trim())
-      .update(rawBuf)
-      .digest('hex');
-
-    if (!timingSafeEq(sig, expected)) {
-      console.warn('[PayOS webhook] invalid signature');
-      return res.status(400).send('invalid signature');
-    }
-
-    const body = JSON.parse(rawBuf.toString('utf8'));
-
-    // Xử lý sự kiện thanh toán
+    const body = JSON.parse(rawBody);
     if (String(body.code) === '00' && body?.data?.status === 'PAID') {
       const orderCode = String(body.data.orderCode);
       const ps = await PaymentSession.findOne({ provider: 'payos', provider_order_id: orderCode });
       if (ps) {
         await creditWalletIdempotent({
           user_id: ps.user_id,
-          amount : ps.amount,
+          amount : ps.amount,  // tin vào số đã lưu khi initiate
           idempotency_key: `payos:${orderCode}`,
           method : 'payos',
           meta   : body.data
@@ -201,17 +170,14 @@ async function payosWebhook(req, res) {
         await PaymentSession.updateOne({ _id: ps._id }, { $set: { status: 'SUCCEEDED' } });
       }
     }
-
     return res.status(200).send('OK');
   } catch (e) {
     console.error('[PayOS webhook] error:', e);
-    // Trả 200 để PayOS không fail cấu hình do lỗi tạm thời
-    return res.status(200).send('OK');
+    return res.status(200).send('OK'); // PayOS chỉ cần 200 để ngừng retry
   }
 }
-
 // Fallback: cộng ví ở return nếu webhook chưa kịp đến
-async function payosReturn(req, res) {
+exports.payosReturn = async (req, res) => {
   try {
     const { orderCode } = req.query;
     const oc = String(orderCode || '');
@@ -252,12 +218,13 @@ async function payosReturn(req, res) {
     console.error('[payosReturn] error:', e.response?.data || e.message);
     return res.status(500).json({ ok: false, msg: e.message, query: req.query });
   }
-}
+};
 
-// Tuỳ chọn: cancel page đơn giản
-async function payosCancel(req, res) {
-  res.json({ provider: 'payos', cancel: true, query: req.query });
-}
+/* =========================
+ * Return/Cancel (optional)
+ * ========================= */
+async function payosReturn(req, res) { res.json({ provider: 'payos', query: req.query }); }
+async function payosCancel(req, res) { res.json({ provider: 'payos', query: req.query }); }
 
 module.exports = {
   initiateTopUpPayOS,

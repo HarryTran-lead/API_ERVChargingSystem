@@ -14,6 +14,7 @@ const {
   scheduleNoShowJob,
   cancelNoShowJob,
 } = require("../services/bookingScheduler");
+const bookingMonitor = require("../services/bookingMonitor");
 
 const toMinutes = (ms) => ms / (60 * 1000);
 
@@ -208,7 +209,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
   }
 
   scheduleNoShowJob(booking);
-
+  bookingMonitor.syncBooking(booking);
   const payload = booking.toObject();
 
   res.status(201).json({
@@ -246,7 +247,7 @@ exports.cancelBooking = asyncHandler(async (req, res) => {
 
   booking.status = BOOKING_STATUS.CANCELLED;
   await booking.save();
-
+  bookingMonitor.syncBooking(booking);
   cancelNoShowJob(booking._id);
 
   await Connector.findOneAndUpdate(
