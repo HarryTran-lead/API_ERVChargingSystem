@@ -1,22 +1,32 @@
+const EventEmitter = require("events");
 const Booking = require("../models/Booking");
 const Connector = require("../models/Connector");
 const { BOOKING_STATUS } = require("../constants/enums");
 
 const scheduledJobs = new Map();
+const schedulerEvents = new EventEmitter();
 
-const runNoShow = async (bookingId) => {
+const autoCancelBooking = async (bookingId) => {
   try {
     const booking = await Booking.findById(bookingId);
-    if (!booking) return;
+    if (!booking) return null;
 
     if (booking.status !== BOOKING_STATUS.RESERVED) return;
 
     booking.status = BOOKING_STATUS.NO_SHOW;
     await booking.save();
 
-    await Connector.findByIdAndUpdate(booking.connectorId, { status: "IDLE" });
+    await Connector.findOneAndUpdate(
+      { _id: booking.connectorId, status: "RESERVED" },
+      { status: "IDLE" }
+    );
+
+    schedulerEvents.emit("autoCancelled", booking.toObject());
+
+    return booking;
   } catch (err) {
     console.error("[bookingScheduler] Failed to mark booking as no-show", err);
+    throw err;
   }
 };
 
@@ -29,13 +39,29 @@ const scheduleNoShowJob = (booking) => {
 
   const delay = booking.checkInDeadline.getTime() - Date.now();
   if (delay <= 0) {
-    setImmediate(() => runNoShow(booking._id));
+    setImmediate(() => {
+      autoCancelBooking(booking._id).catch((err) => {
+        console.error(
+          "[bookingScheduler] Immediate auto-cancel failed for booking",
+          bookingId,
+          err
+        );
+      });
+    });
     return;
   }
 
   const timer = setTimeout(() => {
     scheduledJobs.delete(bookingId);
-    runNoShow(booking._id);
+    setImmediate(() => {
+      autoCancelBooking(booking._id).catch((err) => {
+        console.error(
+          "[bookingScheduler] Immediate auto-cancel failed for booking",
+          bookingId,
+          err
+        );
+      });
+    });
   }, delay);
 
   scheduledJobs.set(bookingId, timer);
@@ -53,4 +79,6 @@ const cancelNoShowJob = (bookingId) => {
 module.exports = {
   scheduleNoShowJob,
   cancelNoShowJob,
+  autoCancelBooking,
+  schedulerEvents,
 };

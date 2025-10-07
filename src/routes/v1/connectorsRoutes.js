@@ -10,5 +10,9 @@ router.get("/:id", protect([ROLES.ADMIN, ROLES.STAFF, ROLES.DRIVER]), C.getConne
 router.put("/:id", protect([ROLES.ADMIN]), C.updateConnector);
 router.patch("/:id/status", protect([ROLES.ADMIN, ROLES.STAFF]), C.patchConnectorStatus);
 router.delete("/:id", protect([ROLES.ADMIN]), C.deleteConnector);
-
+router.get(
+  "/scan/:token",
+  protect([ROLES.ADMIN, ROLES.STAFF, ROLES.DRIVER]),
+  C.getConnectorScanDetails
+);
 module.exports = router;

@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Booking = require("../models/Booking");
 const Connector = require("../models/Connector");
+const Vehicle = require("../models/Vehicle");
 const Session = require("../models/Session");
 const Wallet = require("../models/Wallet");
 const asyncHandler = require("../utils/asyncHandler");
@@ -15,7 +16,10 @@ const {
   SESSION_IDLE_FEE_INTERVAL_MINUTES,
 } = require("../constants/business");
 const { cancelNoShowJob } = require("../services/bookingScheduler");
-
+const {
+  startSessionBroadcast,
+  finalizeSessionBroadcast,
+} = require("../services/chargingMonitor");
 const randomIntInclusive = (min, max) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -45,19 +49,30 @@ const buildSessionQuery = (userId, reference) => {
   return query;
 };
 
-const computeChargeDurationMinutes = (socStart) => {
-  const maxMinutes = BOOKING_SLOT_MINUTES;
-  const minRequiredMinutes = Math.min(
-    maxMinutes,
-    Math.max(10, Math.ceil((100 - socStart) / 2))
-  );
-
-  if (minRequiredMinutes >= maxMinutes) {
-    return maxMinutes;
+const resolveConfiguredChargeDurationMinutes = () => {
+  const raw = process.env.SESSION_CHARGE_DURATION_MINUTES;
+  if (!raw) {
+    return null;
   }
 
-  const additionalWindow = maxMinutes - minRequiredMinutes;
-  return minRequiredMinutes + randomIntInclusive(0, additionalWindow);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return parsed;
+};
+
+const computeChargeDurationMinutes = () => {
+  const configured = resolveConfiguredChargeDurationMinutes();
+  const maxMinutes = BOOKING_SLOT_MINUTES;
+  
+
+  if (configured) {
+    return Math.min(maxMinutes, Math.round(configured));
+  }
+
+   return maxMinutes;
 };
 
 const computeSocAtStop = (session, elapsedMinutes) => {
@@ -165,6 +180,30 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
 
   cancelNoShowJob(booking._id);
 
+  let batteryKwh =
+    booking.vehicle?.batteryKwh && Number(booking.vehicle.batteryKwh) > 0
+      ? Number(booking.vehicle.batteryKwh)
+      : null;
+
+  if (!batteryKwh && booking.vehicleId) {
+    const linkedVehicle = await Vehicle.findOne({
+      id: booking.vehicleId,
+      userId: booking.userId,
+    })
+      .select("batteryKwh")
+      .lean();
+
+    if (linkedVehicle?.batteryKwh && Number(linkedVehicle.batteryKwh) > 0) {
+      batteryKwh = Number(linkedVehicle.batteryKwh);
+    }
+  }
+
+  const parsedConnectorPower = Number(connector.powerKw);
+  const connectorPowerKw =
+    Number.isFinite(parsedConnectorPower) && parsedConnectorPower > 0
+      ? parsedConnectorPower
+      : null;
+
   const socStart = randomIntInclusive(
     SESSION_SOC_RANDOM_MIN,
     SESSION_SOC_RANDOM_MAX
@@ -209,12 +248,19 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     minBalanceRequired: SESSION_MIN_BALANCE_BASE_VND,
   });
 
+  const sessionPayload = formatSessionPayload(session);
+  startSessionBroadcast(sessionPayload, {
+    batteryKwh,
+    connectorPowerKw,
+  });
+
   booking.status = BOOKING_STATUS.CHECKED_IN;
   await booking.save();
+  bookingMonitor.syncBooking(booking);
 
   res.status(201).json({
     message: "Charging session started",
-    session: formatSessionPayload(session),
+    session: sessionPayload,
     notices:
       idleFeeNoticeAt && idleFeeNoticeAt < slotEnd
         ? [
@@ -266,12 +312,21 @@ exports.stopSession = asyncHandler(async (req, res) => {
   await session.save();
 
   await Connector.findByIdAndUpdate(session.connectorId, { status: "IDLE" });
-  await Booking.findByIdAndUpdate(session.bookingId, {
-    status: BOOKING_STATUS.COMPLETED,
-  });
+  const updatedBooking = await Booking.findByIdAndUpdate(
+    session.bookingId,
+    {
+      status: BOOKING_STATUS.COMPLETED,
+    },
+    { new: true }
+  );
+
+  if (updatedBooking) {
+    bookingMonitor.syncBooking(updatedBooking);
+  }
 
   const payload = formatSessionPayload(session);
-
+  finalizeSessionBroadcast(payload);
+  
   const notices = [];
   if (socEnd >= 100 && now < session.slotEnd) {
     notices.push(
