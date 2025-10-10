@@ -1,8 +1,10 @@
 // src/models/Connector.js
 const mongoose = require("mongoose");
 const { v4: uuidv4 } = require("uuid");
-const { CONNECTOR_STATUS } = require("../constants/enums");
-
+const {
+  CONNECTOR_STATUS,
+  TARIFF_CONNECTOR_TYPES,
+} = require("../constants/enums");
 const ConnectorSchema = new mongoose.Schema(
   {
     stationId: {
@@ -17,8 +19,13 @@ const ConnectorSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-    type: { type: String, required: true, trim: true }, // VD: DC, AC, CCS2
-    powerKw: { type: Number, required: false, min: 0, default: 0 },
+    type: {
+      type: String,
+      enum: TARIFF_CONNECTOR_TYPES,
+      required: true,
+      trim: true,
+    },
+    powerKw: { type: Number, required: true, min: 0 },
     status: {
       type: String,
       enum: CONNECTOR_STATUS,

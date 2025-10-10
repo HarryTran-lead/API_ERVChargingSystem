@@ -1,3 +1,5 @@
+const { completeSessionByReference } = require("./sessionFinalizer");
+
 const PROJECT_WINDOW_MINUTES = 30;
 const TICK_INTERVAL_MS = 1000;
 
@@ -178,6 +180,49 @@ const startSessionBroadcast = (sessionPayload, context = {}) => {
 
     if (nextSnapshot.status === "completed") {
       cancelActiveInterval(entry.sessionId);
+      const expectedStop = (() => {
+        if (
+          entry.startedAt instanceof Date &&
+          !Number.isNaN(entry.startedAt.getTime()) &&
+          entry.chargeDurationMinutes
+        ) {
+          return new Date(
+            entry.startedAt.getTime() +
+              Math.round(entry.chargeDurationMinutes * 60 * 1000)
+          );
+        }
+        return new Date();
+      })();
+
+      completeSessionByReference(entry.sessionId, {
+        stoppedAt: expectedStop,
+      })
+        .then((sessionDoc) => {
+          if (!sessionDoc) {
+            return;
+          }
+
+          const payload =
+            typeof sessionDoc.toObject === "function"
+              ? sessionDoc.toObject()
+              : sessionDoc;
+
+          finalizeSessionBroadcast(payload, {
+            elapsedSeconds: nextSnapshot.elapsedSeconds,
+            socCurrent: nextSnapshot.socCurrent,
+            status: "COMPLETED",
+          });
+        })
+        .catch((err) => {
+          if (process.env.NODE_ENV !== "test") {
+            // eslint-disable-next-line no-console
+            console.error(
+              "[charging-monitor] Failed to auto-complete session",
+              entry.sessionId,
+              err
+            );
+          }
+        });
     }
   }, TICK_INTERVAL_MS);
 

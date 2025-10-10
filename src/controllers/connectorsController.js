@@ -15,12 +15,20 @@ const {
 } = require("../constants/business");
 
 exports.createConnector = asyncHandler(async (req, res) => {
-  const { chargerId, type, powerKw, status, code } = req.body;
+  const { chargerId, status, code } = req.body;
   const charger = await Charger.findById(chargerId)
-    .select("_id stationId")
+    .select("_id stationId connectorType powerKw")
     .lean();
   if (!charger) {
     throw new HttpError(400, "Invalid chargerId");
+  }
+
+  if (!charger.connectorType) {
+    throw new HttpError(409, "Charger is missing connector type configuration");
+  }
+
+  if (charger.powerKw === undefined || charger.powerKw === null) {
+    throw new HttpError(409, "Charger is missing power configuration");
   }
 
   const st = await Station.findById(charger.stationId).select("_id").lean();
@@ -39,8 +47,8 @@ exports.createConnector = asyncHandler(async (req, res) => {
   const c = await Connector.create({
     stationId: charger.stationId,
     chargerId,
-    type,
-    powerKw,
+    type: charger.connectorType,
+    powerKw: charger.powerKw,
     status: status || "IDLE",
     code,
   });
@@ -69,17 +77,32 @@ exports.getConnector = asyncHandler(async (req, res) => {
 });
 
 exports.updateConnector = asyncHandler(async (req, res) => {
-  const { type, powerKw, code } = req.body;
-  const upd = {};
-  if (type !== undefined) upd.type = type;
-  if (powerKw !== undefined) upd.powerKw = powerKw;
-  if (code !== undefined) upd.code = code;
+  const { code } = req.body;
+  const connector = await Connector.findById(req.params.id);
+  if (!connector) throw new HttpError(404, "Connector not found");
 
-  const doc = await Connector.findByIdAndUpdate(req.params.id, upd, {
-    new: true,
-  });
-  if (!doc) throw new HttpError(404, "Connector not found");
-  res.json(doc);
+  if (code !== undefined) connector.code = code;
+
+  const charger = await Charger.findById(connector.chargerId)
+    .select("connectorType powerKw")
+    .lean();
+  if (!charger) {
+    throw new HttpError(409, "Connector is linked to an invalid charger");
+  }
+
+  if (!charger.connectorType) {
+    throw new HttpError(409, "Charger is missing connector type configuration");
+  }
+
+  if (charger.powerKw === undefined || charger.powerKw === null) {
+    throw new HttpError(409, "Charger is missing power configuration");
+  }
+
+  connector.type = charger.connectorType;
+  connector.powerKw = charger.powerKw;
+
+  await connector.save();
+  res.json(connector);
 });
 
 // PATCH status với rule: không cho OFFLINE khi đang CHARGING

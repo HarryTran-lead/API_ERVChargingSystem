@@ -68,11 +68,11 @@ async function initiateTopUpPayOS(req, res) {
 
     // Kiểm tra ENV (tránh gửi thiếu thông tin)
     const missing = [];
-    if (!PAYOS_CLIENT_ID) missing.push('PAYOS_CLIENT_ID');
-    if (!PAYOS_API_KEY) missing.push('PAYOS_API_KEY');
+    if (!PAYOS_CLIENT_ID)    missing.push('PAYOS_CLIENT_ID');
+    if (!PAYOS_API_KEY)      missing.push('PAYOS_API_KEY');
     if (!PAYOS_CHECKSUM_KEY) missing.push('PAYOS_CHECKSUM_KEY');
-    if (!PAYOS_RETURN_URL) missing.push('PAYOS_RETURN_URL');
-    if (!PAYOS_CANCEL_URL) missing.push('PAYOS_CANCEL_URL');
+    if (!PAYOS_RETURN_URL)   missing.push('PAYOS_RETURN_URL');
+    if (!PAYOS_CANCEL_URL)   missing.push('PAYOS_CANCEL_URL');
     if (missing.length) return res.status(400).json({ msg: 'Thiếu ENV PayOS', missing });
 
     // Input
@@ -114,7 +114,7 @@ async function initiateTopUpPayOS(req, res) {
       {
         headers: {
           'x-client-id': (PAYOS_CLIENT_ID || '').trim(),
-          'x-api-key': (PAYOS_API_KEY || '').trim(),
+          'x-api-key'  : (PAYOS_API_KEY  || '').trim(),
           'content-type': 'application/json'
         }
       }
@@ -162,11 +162,10 @@ async function payosWebhook(req, res) {
       if (ps) {
         await creditWalletIdempotent({
           user_id: ps.user_id,
-
-          amount: ps.amount,
+          amount : ps.amount,  // tin vào số đã lưu khi initiate
           idempotency_key: `payos:${orderCode}`,
-          method: 'payos',
-          meta: body.data
+          method : 'payos',
+          meta   : body.data
         });
         await PaymentSession.updateOne({ _id: ps._id }, { $set: { status: 'SUCCEEDED' } });
       }
@@ -193,31 +192,28 @@ exports.payosReturn = async (req, res) => {
       const { data } = await axios.get(`${BASE}/payment-requests/${oc}`, {
         headers: {
           'x-client-id': (process.env.PAYOS_CLIENT_ID || '').trim(),
-          'x-api-key': (process.env.PAYOS_API_KEY || '').trim(),
+          'x-api-key'  : (process.env.PAYOS_API_KEY  || '').trim(),
         }
       });
 
       const status = data?.data?.status;
       if (status === 'PAID') {
         // 3) Cộng ví idempotent
-        await creditWalletIdempotent({
+        const r = await creditWalletIdempotent({
           user_id: ps.user_id,
-          amount: ps.amount,
+          amount : ps.amount,
           idempotency_key: `payos:${oc}`,
-          method: 'payos',
-          meta: { source: 'return_fallback' }
+          method : 'payos',
+          meta   : { source: 'return_fallback' }
         });
         await PaymentSession.updateOne({ _id: ps._id }, { $set: { status: 'SUCCEEDED' } });
+
+        return res.json({ ok: true, credited: true, balance: r.balance, query: req.query });
       }
     }
 
-    // Lấy lại số dư ví mới và luôn redirect về frontend
-    const amount = ps.amount;
-    const w = await Wallet.findOne({ user_id: ps.user_id });
-    const balance = w ? w.balance : 0;
-    return res.redirect(
-      `http://localhost:5173/topup/success?orderCode=${orderCode}&amount=${amount}&balance=${balance}&status=PAID`
-    );
+    // Đã cộng trước đó (do webhook) hoặc chưa PAID
+    return res.json({ ok: true, credited: ps.status === 'SUCCEEDED', query: req.query });
   } catch (e) {
     console.error('[payosReturn] error:', e.response?.data || e.message);
     return res.status(500).json({ ok: false, msg: e.message, query: req.query });

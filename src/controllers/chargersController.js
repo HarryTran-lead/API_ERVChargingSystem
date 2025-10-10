@@ -5,7 +5,7 @@ const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
 
 exports.createCharger = asyncHandler(async (req, res) => {
-  const { stationId, name, code, status } = req.body;
+  const { stationId, name, code, status, connectorType, powerKw } = req.body;
   const station = await Station.findById(stationId).select("_id").lean();
   if (!station) {
     throw new HttpError(400, "Invalid stationId");
@@ -15,6 +15,8 @@ exports.createCharger = asyncHandler(async (req, res) => {
     stationId,
     name,
     code,
+    connectorType,
+    powerKw,
     status: status || "ONLINE",
   });
 
@@ -44,11 +46,13 @@ exports.getCharger = asyncHandler(async (req, res) => {
 });
 
 exports.updateCharger = asyncHandler(async (req, res) => {
-  const { name, code, status } = req.body;
+   const { name, code, status, connectorType, powerKw } = req.body;
   const updates = {};
   if (name !== undefined) updates.name = name;
   if (code !== undefined) updates.code = code;
   if (status !== undefined) updates.status = status;
+  if (connectorType !== undefined) updates.connectorType = connectorType;
+  if (powerKw !== undefined) updates.powerKw = powerKw;
 
   const charger = await Charger.findByIdAndUpdate(req.params.id, updates, {
     new: true,
@@ -56,6 +60,14 @@ exports.updateCharger = asyncHandler(async (req, res) => {
 
   if (!charger) {
     throw new HttpError(404, "Charger not found");
+  }
+
+  const connectorUpdates = {};
+  if (connectorType !== undefined)
+    connectorUpdates.type = charger.connectorType;
+  if (powerKw !== undefined) connectorUpdates.powerKw = charger.powerKw;
+  if (Object.keys(connectorUpdates).length > 0) {
+    await Connector.updateMany({ chargerId: charger._id }, connectorUpdates);
   }
 
   res.json(charger);
