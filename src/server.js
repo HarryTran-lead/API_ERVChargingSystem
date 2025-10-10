@@ -37,11 +37,12 @@ app.use('/api/v1/stations', require('./routes/v1/stationsRoutes'));
 app.use('/api/v1/connectors', require('./routes/v1/connectorsRoutes'));
 app.use('/api/v1/wallets', require('./routes/v1/walletRoutes'));
 app.use('/api/v1/tariffs', require('./routes/v1/tariffsRoutes'));
-app.use('/api/v1/payments', require('./routes/v1/paymentRoutes')); // KHÔNG khai báo webhook ở file routes nữa
-app.use("/api/v1/bookings", require("./routes/v1/bookingsRoutes"));
-app.use("/api/v1/vehicles", require("./routes/v1/vehiclesRoutes"));
-app.use("/api/v1/sessions", require("./routes/v1/sessionsRoutes"));
+app.use('/api/v1/payments', require('./routes/v1/paymentRoutes')); // KHÔNG định nghĩa /payos/webhook trong file này
+app.use('/api/v1/bookings', require('./routes/v1/bookingsRoutes'));
+app.use('/api/v1/sessions', require('./routes/v1/sessionsRoutes'));
+app.use('/api/v1/vehicles', require('./routes/v1/vehicleRoutes'));
 app.use("/api/v1/chargers", require("./routes/v1/chargersRoutes"));
+
 
 app.use((req, res) => {
   res.status(404).json({
