@@ -1,4 +1,3 @@
-// src/models/Vehicle.js
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
@@ -77,3 +76,4 @@ vehicleSchema.index(
 );
 
 module.exports = mongoose.model('Vehicle', vehicleSchema);
+

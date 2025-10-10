@@ -1,6 +1,9 @@
 const mongoose = require("mongoose");
 const { v4: uuidv4 } = require("uuid");
-const { BOOKING_STATUS_VALUES } = require("../constants/enums");
+const {
+  BOOKING_STATUS_VALUES,
+  VEHICLE_PLUG_TYPES,
+} = require("../constants/enums");
 
 const BookingSchema = new mongoose.Schema(
   {
@@ -26,6 +29,15 @@ const BookingSchema = new mongoose.Schema(
       enum: BOOKING_STATUS_VALUES,
       default: "RESERVED",
       index: true,
+    },
+    vehicleId: { type: String, ref: "Vehicle", index: true },
+    vehicle: {
+      id: { type: String, ref: "Vehicle" },
+      make: { type: String, trim: true },
+      model: { type: String, trim: true },
+      plugType: { type: String, enum: VEHICLE_PLUG_TYPES },
+      batteryKwh: { type: Number, min: 0 },
+      licensePlate: { type: String, trim: true },
     },
   },
   { timestamps: true }
