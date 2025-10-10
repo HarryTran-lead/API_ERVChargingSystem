@@ -20,6 +20,8 @@ const {
   startSessionBroadcast,
   finalizeSessionBroadcast,
 } = require("../services/chargingMonitor");
+const bookingMonitor = require("../services/bookingMonitor");
+const { completeSession } = require("../services/sessionFinalizer");
 const randomIntInclusive = (min, max) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -75,21 +77,21 @@ const computeChargeDurationMinutes = () => {
    return maxMinutes;
 };
 
-const computeSocAtStop = (session, elapsedMinutes) => {
-  if (!session.chargeDurationMinutes || session.chargeDurationMinutes <= 0) {
-    return 100;
-  }
+// const computeSocAtStop = (session, elapsedMinutes) => {
+//   if (!session.chargeDurationMinutes || session.chargeDurationMinutes <= 0) {
+//     return 100;
+//   }
 
-  const chargingMinutes = Math.min(
-    elapsedMinutes,
-    session.chargeDurationMinutes
-  );
+//   const chargingMinutes = Math.min(
+//     elapsedMinutes,
+//     session.chargeDurationMinutes
+//   );
 
-  const progress = Math.min(1, chargingMinutes / session.chargeDurationMinutes);
+//   const progress = Math.min(1, chargingMinutes / session.chargeDurationMinutes);
 
-  const socDelta = (100 - session.socStart) * progress;
-  return Math.min(100, Number((session.socStart + socDelta).toFixed(1)));
-};
+//   const socDelta = (100 - session.socStart) * progress;
+//   return Math.min(100, Number((session.socStart + socDelta).toFixed(1)));
+// };
 
 const toPlainSession = (session) =>
   typeof session.toObject === "function" ? session.toObject() : session;
@@ -138,9 +140,9 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
   }
 
   const now = new Date();
-  if (now < new Date(booking.slotStart)) {
-    throw new HttpError(409, "Cannot start charging before the reserved slot");
-  }
+  // if (now < new Date(booking.slotStart)) {
+  //   throw new HttpError(409, "Cannot start charging before the reserved slot");
+  // }
 
   if (now > new Date(booking.checkInDeadline)) {
     throw new HttpError(409, "Booking check-in window has expired");
@@ -288,54 +290,56 @@ exports.stopSession = asyncHandler(async (req, res) => {
   }
 
   const now = new Date();
-  const elapsedMinutes = (now.getTime() - session.startedAt.getTime()) / 60000;
-  const socEnd = computeSocAtStop(session, elapsedMinutes);
-  const totalChargingMinutes = Math.min(
-    elapsedMinutes,
-    session.chargeDurationMinutes
-  );
-  const totalIdleMinutes = Math.max(
-    0,
-    elapsedMinutes - session.chargeDurationMinutes
-  );
-  const idleFeeIntervalsApplied = Math.floor(
-    totalIdleMinutes / session.idleFeeIntervalMinutes
-  );
+  // const elapsedMinutes = (now.getTime() - session.startedAt.getTime()) / 60000;
+  // const socEnd = computeSocAtStop(session, elapsedMinutes);
+  // const totalChargingMinutes = Math.min(
+  //   elapsedMinutes,
+  //   session.chargeDurationMinutes
+  // );
+  // const totalIdleMinutes = Math.max(
+  //   0,
+  //   elapsedMinutes - session.chargeDurationMinutes
+  // );
+  // const idleFeeIntervalsApplied = Math.floor(
+  //   totalIdleMinutes / session.idleFeeIntervalMinutes
+  // );
 
-  session.status = SESSION_STATUS.COMPLETED;
-  session.socEnd = socEnd;
-  session.stoppedAt = now;
-  session.totalChargingMinutes = Number(totalChargingMinutes.toFixed(1));
-  session.totalIdleMinutes = Number(totalIdleMinutes.toFixed(1));
-  session.idleFeeIntervalsApplied = idleFeeIntervalsApplied;
+  // session.status = SESSION_STATUS.COMPLETED;
+  // session.socEnd = socEnd;
+  // session.stoppedAt = now;
+  // session.totalChargingMinutes = Number(totalChargingMinutes.toFixed(1));
+  // session.totalIdleMinutes = Number(totalIdleMinutes.toFixed(1));
+  // session.idleFeeIntervalsApplied = idleFeeIntervalsApplied;
 
-  await session.save();
+  // await session.save();
 
-  await Connector.findByIdAndUpdate(session.connectorId, { status: "IDLE" });
-  const updatedBooking = await Booking.findByIdAndUpdate(
-    session.bookingId,
-    {
-      status: BOOKING_STATUS.COMPLETED,
-    },
-    { new: true }
-  );
+  // await Connector.findByIdAndUpdate(session.connectorId, { status: "IDLE" });
+  // const updatedBooking = await Booking.findByIdAndUpdate(
+  //   session.bookingId,
+  //   {
+  //     status: BOOKING_STATUS.COMPLETED,
+  //   },
+  //   { new: true }
+  // );
 
-  if (updatedBooking) {
-    bookingMonitor.syncBooking(updatedBooking);
-  }
+  // if (updatedBooking) {
+  //   bookingMonitor.syncBooking(updatedBooking);
+  // }
 
-  const payload = formatSessionPayload(session);
+  // const payload = formatSessionPayload(session);
+  const finalizedSession = await completeSession(session, { stoppedAt: now });
+  const payload = formatSessionPayload(finalizedSession);
   finalizeSessionBroadcast(payload);
   
   const notices = [];
-  if (socEnd >= 100 && now < session.slotEnd) {
+  if (finalizedSession.socEnd >= 100 && now < finalizedSession.slotEnd) {
     notices.push(
       "Vehicle hit 100% before the slot ended. Please free the connector for the next driver."
     );
   }
-  if (idleFeeIntervalsApplied > 0) {
+  if (finalizedSession.idleFeeIntervalsApplied > 0) {
     notices.push(
-      `Idle fees apply for ${idleFeeIntervalsApplied} interval(s) of ${SESSION_IDLE_FEE_INTERVAL_MINUTES} minutes.`
+      `Idle fees apply for ${finalizedSession.idleFeeIntervalsApplied} interval(s) of ${SESSION_IDLE_FEE_INTERVAL_MINUTES} minutes.`
     );
   }
 

@@ -111,13 +111,13 @@ exports.createBooking = asyncHandler(async (req, res) => {
 
   const normalizedStart = new Date(start);
   normalizedStart.setSeconds(0, 0);
-  const minutes = normalizedStart.getMinutes();
-  if (minutes % BOOKING_SLOT_MINUTES !== 0) {
-    throw new HttpError(
-      400,
-      `slotStart must align to ${BOOKING_SLOT_MINUTES}-minute intervals`
-    );
-  }
+  // const minutes = normalizedStart.getMinutes();
+  // if (minutes % BOOKING_SLOT_MINUTES !== 0) {
+  //   throw new HttpError(
+  //     400,
+  //     `slotStart must align to ${BOOKING_SLOT_MINUTES}-minute intervals`
+  //   );
+  // }
 
   const now = new Date();
   if (
