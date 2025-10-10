@@ -14,7 +14,8 @@ const app = express();
 const server = http.createServer(app);
 setupSocketServer(server);
 connectDB();
-
+// CORS
+app.use(require("./config/cors"));
 // PayOS webhook: PHẢI đặt TRƯỚC express.json()
 app.post('/api/v1/payments/payos/webhook',
   express.raw({ type: 'application/json' }),
