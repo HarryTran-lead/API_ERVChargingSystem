@@ -3,6 +3,7 @@ const Booking = require("../models/Booking");
 const Connector = require("../models/Connector");
 const Vehicle = require("../models/Vehicle");
 const Session = require("../models/Session");
+const Tariff = require("../models/Tariff");
 const Wallet = require("../models/Wallet");
 const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
@@ -24,7 +25,10 @@ const bookingMonitor = require("../services/bookingMonitor");
 const { completeSession } = require("../services/sessionFinalizer");
 const randomIntInclusive = (min, max) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
-
+const toNumber = (value, fallback = 0) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
 const buildBookingQuery = (userId, reference) => {
   const query = {
     userId,
@@ -119,6 +123,8 @@ const formatSessionPayload = (sessionDoc) => {
     totalIdleMinutes: session.totalIdleMinutes,
     idleFeeIntervalsApplied: session.idleFeeIntervalsApplied,
     minBalanceRequired: session.minBalanceRequired,
+    pricing: session.pricing,
+    billing: session.billing,
   };
 };
 
@@ -231,7 +237,27 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
             SESSION_IDLE_FEE_INTERVAL_MINUTES * 60 * 1000
         )
       : null;
+  const tariff = await Tariff.findEffectiveAt(
+    booking.stationId,
+    connector.type,
+    startedAt
+  );
 
+  const pricingSnapshot = tariff
+    ? {
+        tariffId: tariff._id,
+        mode: tariff.mode,
+        connectorType: tariff.connectorType,
+        pricePerMin: toNumber(tariff.pricePerMin, 0),
+        idleFeePerMin: toNumber(tariff.idleFeePerMin, 0),
+        pricePerKwh: toNumber(tariff.pricePerKwh, 0),
+        graceMin: toNumber(tariff.graceMin, 0),
+        currency: "VND",
+        effectiveFrom: tariff.effectiveFrom,
+      }
+    : {
+        currency: "VND",
+      };
   const session = await Session.create({
     bookingId: booking._id,
     bookingRef: booking.id,
@@ -248,6 +274,8 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     chargeDurationMinutes,
     idleFeeIntervalMinutes: SESSION_IDLE_FEE_INTERVAL_MINUTES,
     minBalanceRequired: SESSION_MIN_BALANCE_BASE_VND,
+    pricing: pricingSnapshot,
+    billing: { currency: pricingSnapshot.currency },
   });
 
   const sessionPayload = formatSessionPayload(session);

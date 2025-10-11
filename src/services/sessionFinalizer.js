@@ -84,7 +84,73 @@ async function completeSession(session, options = {}) {
   session.totalChargingMinutes = Number(totalChargingMinutes.toFixed(1));
   session.totalIdleMinutes = Number(totalIdleMinutes.toFixed(1));
   session.idleFeeIntervalsApplied = idleFeeIntervalsApplied;
+  let connectorPowerKw = 0;
+  if (session.connectorId) {
+    const connector = await Connector.findById(session.connectorId)
+      .select("powerKw")
+      .lean();
+    connectorPowerKw = toNumber(connector?.powerKw, 0);
+  }
 
+  const normalizedChargingMinutes = toNumber(session.totalChargingMinutes, 0);
+  const normalizedIdleMinutes = toNumber(session.totalIdleMinutes, 0);
+  const pricePerMin = toNumber(session.pricing?.pricePerMin, 0);
+  const pricePerKwh = toNumber(session.pricing?.pricePerKwh, 0);
+  const idleRatePerMin = toNumber(session.pricing?.idleFeePerMin, 0);
+  const graceMin = toNumber(session.pricing?.graceMin, 0);
+  const pricingModeRaw = session.pricing?.mode;
+  const pricingMode =
+    typeof pricingModeRaw === "string"
+      ? pricingModeRaw.toLowerCase()
+      : undefined;
+  const billableIdleMinutesRaw = Math.max(0, normalizedIdleMinutes - graceMin);
+  const billableIdleMinutes = Number(billableIdleMinutesRaw.toFixed(1));
+
+  let energyKwh = null;
+  if (connectorPowerKw > 0 && normalizedChargingMinutes > 0) {
+    const energy = (connectorPowerKw * normalizedChargingMinutes) / 60;
+    energyKwh = Number(energy.toFixed(3));
+  }
+
+  const amountFromTime = Math.round(pricePerMin * normalizedChargingMinutes);
+  const amountFromEnergy =
+    pricePerKwh > 0 && energyKwh !== null
+      ? Math.round(pricePerKwh * energyKwh)
+      : 0;
+
+  let chargingAmount = amountFromTime;
+  if (pricingMode === "energy") {
+    chargingAmount = amountFromEnergy || amountFromTime;
+  } else if (pricingMode === "hybrid") {
+    chargingAmount = amountFromTime + amountFromEnergy;
+  } else if (pricingMode !== "time") {
+    chargingAmount = amountFromTime || amountFromEnergy;
+  }
+
+  const idleAmount = Math.round(idleRatePerMin * billableIdleMinutes);
+  const currency =
+    session.pricing?.currency || session.billing?.currency || "VND";
+
+  const breakdown = {
+    chargingRatePerMin: pricePerMin,
+    chargingRatePerKwh: pricePerKwh,
+    chargingBillableMinutes: normalizedChargingMinutes,
+    idleRatePerMin: idleRatePerMin,
+    idleBillableMinutes: billableIdleMinutes,
+    pricingMode: pricingModeRaw || null,
+  };
+
+  if (energyKwh !== null) {
+    breakdown.energyKwh = energyKwh;
+  }
+
+  session.billing = {
+    chargingAmount,
+    idleAmount,
+    totalAmount: chargingAmount + idleAmount,
+    currency,
+    breakdown,
+  };
   await session.save();
 
   if (session.connectorId) {

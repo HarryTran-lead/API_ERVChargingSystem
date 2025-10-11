@@ -47,6 +47,32 @@ const SessionSchema = new mongoose.Schema(
     totalIdleMinutes: { type: Number, default: 0 },
     idleFeeIntervalsApplied: { type: Number, default: 0 },
     minBalanceRequired: { type: Number, default: 0 },
+    pricing: {
+      tariffId: { type: mongoose.Schema.Types.ObjectId, ref: "Tariff" },
+      pricePerMin: { type: Number, default: 0 },
+      idleFeePerMin: { type: Number, default: 0 },
+      pricePerKwh: { type: Number, default: 0 },
+      graceMin: { type: Number, default: 0 },
+      currency: { type: String, default: "VND" },
+      effectiveFrom: { type: Date },
+      mode: { type: String },
+      connectorType: { type: String },
+    },
+    billing: {
+      chargingAmount: { type: Number, default: 0 },
+      idleAmount: { type: Number, default: 0 },
+      totalAmount: { type: Number, default: 0 },
+      currency: { type: String, default: "VND" },
+      breakdown: {
+        chargingRatePerMin: { type: Number, default: 0 },
+        chargingRatePerKwh: { type: Number, default: 0 },
+        chargingBillableMinutes: { type: Number, default: 0 },
+        energyKwh: { type: Number, default: 0 },
+        pricingMode: { type: String },
+        idleRatePerMin: { type: Number, default: 0 },
+        idleBillableMinutes: { type: Number, default: 0 },
+      },
+    },
   },
   { timestamps: true }
 );
