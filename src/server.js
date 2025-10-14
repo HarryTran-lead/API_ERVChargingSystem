@@ -24,6 +24,7 @@ app.post('/api/v1/payments/payos/webhook',
 
 // Các route khác mới dùng JSON parser
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // nếu bạn đôi khi gửi x-www-form-urlencoded
 
 // Routes app
 app.use('/api/v1/auth', require('./routes/v1/authRoutes'));
