@@ -7,6 +7,7 @@ exports.createTariff = asyncHandler(async (req, res) => {
   const {
     stationId,
     mode,
+    connectorType,
     pricePerKwh,
     pricePerMin,
     idleFeePerMin,
@@ -23,6 +24,7 @@ exports.createTariff = asyncHandler(async (req, res) => {
   const t = await Tariff.create({
     stationId,
     mode,
+    connectorType,
     pricePerKwh,
     pricePerMin,
     idleFeePerMin,
@@ -34,9 +36,10 @@ exports.createTariff = asyncHandler(async (req, res) => {
 });
 
 exports.listTariffs = asyncHandler(async (req, res) => {
-  const { stationId, active, page = 1, limit = 20 } = req.query;
+  const { stationId, connectorType, active, page = 1, limit = 20 } = req.query;
   const q = {};
   if (stationId) q.stationId = stationId;
+  if (connectorType) q.connectorType = connectorType;
   if (active !== undefined) q.active = String(active) === "true";
 
   const docs = await Tariff.find(q)
@@ -58,6 +61,7 @@ exports.updateTariff = asyncHandler(async (req, res) => {
   // Lưu ý: Không sửa ngược lịch sử cho snapshot phiên đã chạy — tuỳ chính sách bạn có thể hạn chế trường này.
   const allowed = [
     "mode",
+    "connectorType",
     "pricePerKwh",
     "pricePerMin",
     "idleFeePerMin",
@@ -81,9 +85,10 @@ exports.deleteTariff = asyncHandler(async (req, res) => {
 
 // Lấy bảng giá hiệu lực tại thời điểm (để snapshot khi start session)
 exports.getEffectiveTariff = asyncHandler(async (req, res) => {
-  const { stationId, at } = req.query;
+  const { stationId, connectorType, at } = req.query;
   if (!stationId) throw new HttpError(400, "stationId is required");
-  const t = await Tariff.findEffectiveAt(stationId, at);
+  if (!connectorType) throw new HttpError(400, "connectorType is required");
+  const t = await Tariff.findEffectiveAt(stationId, connectorType, at);
   if (!t) return res.status(204).send(); // no content
   res.json(t);
 });

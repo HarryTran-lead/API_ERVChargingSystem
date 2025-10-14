@@ -12,6 +12,7 @@ const SESSION_STATUS = {
   STOPPED: "STOPPED",
 };
 const VEHICLE_PLUG_TYPES = ["CCS2", "CHAdeMO", "AC_Type2", "GB/T", "Other"];
+const TARIFF_CONNECTOR_TYPES = ["DC_CCS2", "CHAdeMO"];
 module.exports = {
   ROLES: {
     ADMIN: "admin",
@@ -27,4 +28,5 @@ module.exports = {
   SESSION_STATUS,
   SESSION_STATUS_VALUES: Object.values(SESSION_STATUS),
   VEHICLE_PLUG_TYPES,
+  TARIFF_CONNECTOR_TYPES,
 };
