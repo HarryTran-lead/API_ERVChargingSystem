@@ -39,6 +39,7 @@ app.use("/api/v1/sessions", require("./routes/v1/sessionsRoutes"));
 app.use("/api/v1/vehicles", require("./routes/v1/vehicleRoutes"));
 app.use("/api/v1/chargers", require("./routes/v1/chargersRoutes"));
 app.use("/api/v1/analytics", require("./routes/v1/analyticsRoutes"));
+app.use("/api/v1/invoices", require("./routes/v1/invoiceRoutes"));
 
 app.use((req, res) => {
   res.status(404).json({

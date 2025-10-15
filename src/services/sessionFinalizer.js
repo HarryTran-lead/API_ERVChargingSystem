@@ -4,6 +4,8 @@ const Connector = require("../models/Connector");
 const Booking = require("../models/Booking");
 const { BOOKING_STATUS, SESSION_STATUS } = require("../constants/enums");
 const bookingMonitor = require("./bookingMonitor");
+const Invoice = require("../models/Invoice");
+const { addMinutes } = require("../utils/constants");
 const { calculateSocFromEnergy } = require("../utils/algorithms");
 
 const toNumber = (value, fallback = 0) => {
@@ -210,6 +212,33 @@ async function completeSession(session, options = {}) {
     if (updatedBooking) {
       bookingMonitor.syncBooking(updatedBooking);
     }
+  }
+
+  // Auto-create invoice with due date (e.g. 24h)
+  const total = session.billing?.totalAmount || 0;
+  if (total > 0 && session?.id && session?.userId) {
+    const dueHours = Number(process.env.INVOICE_DUE_HOURS || 24);
+    const due_at = new Date(
+      Date.now() + Math.max(1, dueHours) * 60 * 60 * 1000
+    );
+    await Invoice.findOneAndUpdate(
+      { session_id: session.id },
+      {
+        user_id: session.userId,
+        session_id: session.id,
+        total,
+        currency,
+        issued_at: new Date(),
+        due_at,
+        payment_status: "UNPAID",
+        status: "ISSUED",
+        meta: {
+          stationId: session.stationId,
+          connectorId: session.connectorId,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
   }
 
   return session;
