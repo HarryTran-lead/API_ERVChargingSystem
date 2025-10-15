@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 const { v4: uuidv4 } = require("uuid");
 const { SESSION_STATUS_VALUES } = require("../constants/enums");
@@ -73,6 +72,12 @@ const SessionSchema = new mongoose.Schema(
         idleBillableMinutes: { type: Number, default: 0 },
       },
     },
+    chargingPredictions: {
+      chargePercentageIn30Min: { type: Number, default: 0 },
+      timeToFullChargeMinutes: { type: Number, default: null },
+      energyChargedKwh: { type: Number, default: 0 },
+      energyRemainingKwh: { type: Number, default: 0 },
+    },
   },
   { timestamps: true }
 );
@@ -80,4 +85,3 @@ const SessionSchema = new mongoose.Schema(
 SessionSchema.index({ connectorId: 1, status: 1 });
 
 module.exports = mongoose.model("Session", SessionSchema);
-

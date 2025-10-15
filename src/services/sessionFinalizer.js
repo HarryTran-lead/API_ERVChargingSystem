@@ -4,13 +4,19 @@ const Connector = require("../models/Connector");
 const Booking = require("../models/Booking");
 const { BOOKING_STATUS, SESSION_STATUS } = require("../constants/enums");
 const bookingMonitor = require("./bookingMonitor");
+const { calculateSocFromEnergy } = require("../utils/algorithms");
 
 const toNumber = (value, fallback = 0) => {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
 };
 
-const computeSocAtStop = (session, elapsedMinutes) => {
+const computeSocAtStop = (
+  session,
+  elapsedMinutes,
+  batteryKwh = null,
+  connectorPowerKw = null
+) => {
   const chargeDuration = toNumber(session.chargeDurationMinutes, 0);
   if (!chargeDuration) {
     return 100;
@@ -18,6 +24,23 @@ const computeSocAtStop = (session, elapsedMinutes) => {
 
   const socStart = toNumber(session.socStart, 0);
   const chargingMinutes = Math.min(elapsedMinutes, chargeDuration);
+
+  // Use energy-based calculation if we have battery and connector data
+  if (
+    batteryKwh &&
+    connectorPowerKw &&
+    batteryKwh > 0 &&
+    connectorPowerKw > 0
+  ) {
+    return calculateSocFromEnergy(
+      socStart,
+      batteryKwh,
+      connectorPowerKw,
+      chargingMinutes
+    );
+  }
+
+  // Fallback to time-based calculation
   const progress = Math.min(1, chargingMinutes / chargeDuration);
   const socDelta = (100 - socStart) * progress;
 
@@ -70,7 +93,34 @@ async function completeSession(session, options = {}) {
     0,
     (stoppedAt.getTime() - session.startedAt.getTime()) / 60000
   );
-  const socEnd = computeSocAtStop(session, elapsedMinutes);
+
+  // Get connector power for accurate SOC calculation
+  let connectorPowerKw = 0;
+  if (session.connectorId) {
+    const connector = await Connector.findById(session.connectorId)
+      .select("powerKw")
+      .lean();
+    connectorPowerKw = toNumber(connector?.powerKw, 0);
+  }
+
+  // Get battery info from booking if available
+  let batteryKwh = null;
+  if (session.bookingId) {
+    const booking = await Booking.findById(session.bookingId)
+      .select("vehicle.batteryKwh vehicleId")
+      .lean();
+
+    if (booking?.vehicle?.batteryKwh) {
+      batteryKwh = toNumber(booking.vehicle.batteryKwh, 0);
+    }
+  }
+
+  const socEnd = computeSocAtStop(
+    session,
+    elapsedMinutes,
+    batteryKwh,
+    connectorPowerKw
+  );
   const chargeDuration = toNumber(session.chargeDurationMinutes, 0);
   const totalChargingMinutes = Math.min(elapsedMinutes, chargeDuration);
   const totalIdleMinutes = Math.max(0, elapsedMinutes - chargeDuration);
@@ -84,13 +134,6 @@ async function completeSession(session, options = {}) {
   session.totalChargingMinutes = Number(totalChargingMinutes.toFixed(1));
   session.totalIdleMinutes = Number(totalIdleMinutes.toFixed(1));
   session.idleFeeIntervalsApplied = idleFeeIntervalsApplied;
-  let connectorPowerKw = 0;
-  if (session.connectorId) {
-    const connector = await Connector.findById(session.connectorId)
-      .select("powerKw")
-      .lean();
-    connectorPowerKw = toNumber(connector?.powerKw, 0);
-  }
 
   const normalizedChargingMinutes = toNumber(session.totalChargingMinutes, 0);
   const normalizedIdleMinutes = toNumber(session.totalIdleMinutes, 0);

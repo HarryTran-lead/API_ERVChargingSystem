@@ -1,4 +1,5 @@
 const { completeSessionByReference } = require("./sessionFinalizer");
+const { calculateSocFromEnergy } = require("../utils/algorithms");
 
 const PROJECT_WINDOW_MINUTES = 30;
 const TICK_INTERVAL_MS = 1000;
@@ -67,9 +68,32 @@ const buildSnapshot = (entry, now = new Date()) => {
   const progress =
     totalSeconds > 0 ? Math.min(1, elapsedSeconds / totalSeconds) : 1;
 
-  const socCurrent = Number(
-    (socStart + (socTarget - socStart) * progress).toFixed(1)
-  );
+  // Calculate SOC based on actual energy charged if we have battery and connector data
+  let socCurrent;
+  if (entry.batteryKwh && entry.connectorPowerKw) {
+    const chargingMinutes = elapsedSeconds / 60;
+    socCurrent = calculateSocFromEnergy(
+      socStart,
+      entry.batteryKwh,
+      entry.connectorPowerKw,
+      chargingMinutes
+    );
+  } else {
+    // Fallback to time-based calculation
+    socCurrent = Number(
+      (socStart + (socTarget - socStart) * progress).toFixed(1)
+    );
+  }
+
+  // Calculate charging predictions
+  const energyChargedKwh =
+    entry.batteryKwh && entry.connectorPowerKw
+      ? ((socCurrent - socStart) / 100) * entry.batteryKwh
+      : 0;
+
+  const energyRemainingKwh = entry.batteryKwh
+    ? ((100 - socCurrent) / 100) * entry.batteryKwh
+    : 0;
 
   const snapshot = {
     sessionId: entry.sessionId,
@@ -85,6 +109,23 @@ const buildSnapshot = (entry, now = new Date()) => {
     connectorPowerKw: parseNumber(entry.connectorPowerKw, null),
     batteryKwh: parseNumber(entry.batteryKwh, null),
     projectedEnergy30MinKwh: computeProjectableEnergy(entry, socCurrent),
+    chargingPredictions: {
+      chargePercentageIn30Min:
+        entry.batteryKwh && entry.connectorPowerKw
+          ? Math.min(
+              ((entry.connectorPowerKw * 30) / 60 / entry.batteryKwh) * 100,
+              100 - socCurrent
+            )
+          : 0,
+      timeToFullChargeMinutes:
+        entry.batteryKwh && entry.connectorPowerKw
+          ? ((((100 - socCurrent) / 100) * entry.batteryKwh) /
+              entry.connectorPowerKw) *
+            60
+          : null,
+      energyChargedKwh: Number(Math.max(0, energyChargedKwh).toFixed(2)),
+      energyRemainingKwh: Number(Math.max(0, energyRemainingKwh).toFixed(2)),
+    },
     status: progress >= 1 ? "completed" : "charging",
     updatedAt: now.toISOString(),
   };
@@ -310,6 +351,17 @@ const finalizeSessionBroadcast = (sessionPayload, overrides = {}) => {
     parseNumber(cached.connectorPowerKw) ??
     parseNumber(entry?.connectorPowerKw, null);
 
+  // Calculate final charging predictions
+  const finalEnergyChargedKwh =
+    batteryKwh && socCurrentValue !== null
+      ? ((socCurrentValue - socStart) / 100) * batteryKwh
+      : 0;
+
+  const finalEnergyRemainingKwh =
+    batteryKwh && socCurrentValue !== null
+      ? ((100 - socCurrentValue) / 100) * batteryKwh
+      : 0;
+
   const finalSnapshot = {
     sessionId: key,
     bookingId:
@@ -336,6 +388,25 @@ const finalizeSessionBroadcast = (sessionPayload, overrides = {}) => {
       { batteryKwh, connectorPowerKw, socTarget },
       socCurrentValue ?? socTarget
     ),
+    chargingPredictions: {
+      chargePercentageIn30Min:
+        batteryKwh && connectorPowerKw && socCurrentValue !== null
+          ? Math.min(
+              ((connectorPowerKw * 30) / 60 / batteryKwh) * 100,
+              100 - socCurrentValue
+            )
+          : 0,
+      timeToFullChargeMinutes:
+        batteryKwh && connectorPowerKw && socCurrentValue !== null
+          ? ((((100 - socCurrentValue) / 100) * batteryKwh) /
+              connectorPowerKw) *
+            60
+          : null,
+      energyChargedKwh: Number(Math.max(0, finalEnergyChargedKwh).toFixed(2)),
+      energyRemainingKwh: Number(
+        Math.max(0, finalEnergyRemainingKwh).toFixed(2)
+      ),
+    },
     status:
       overrides.status ||
       (sessionPayload?.status === "COMPLETED" ? "completed" : "stopped"),

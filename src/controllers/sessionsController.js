@@ -23,6 +23,11 @@ const {
 } = require("../services/chargingMonitor");
 const bookingMonitor = require("../services/bookingMonitor");
 const { completeSession } = require("../services/sessionFinalizer");
+const {
+  calculateChargeDurationFromSoc,
+  calculateChargePercentageIn30Min,
+  calculateTimeToFullCharge,
+} = require("../utils/algorithms");
 const randomIntInclusive = (min, max) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
 const toNumber = (value, fallback = 0) => {
@@ -69,16 +74,32 @@ const resolveConfiguredChargeDurationMinutes = () => {
   return parsed;
 };
 
-const computeChargeDurationMinutes = () => {
+const computeChargeDurationMinutes = (
+  socStart,
+  socTarget,
+  batteryKwh,
+  connectorPowerKw
+) => {
   const configured = resolveConfiguredChargeDurationMinutes();
   const maxMinutes = BOOKING_SLOT_MINUTES;
-  
 
+  // If configured for testing, use the configured value
   if (configured) {
     return Math.min(maxMinutes, Math.round(configured));
   }
 
-   return maxMinutes;
+  // Calculate actual duration based on battery and connector specs
+  if (batteryKwh && connectorPowerKw) {
+    const calculatedDuration = calculateChargeDurationFromSoc(
+      socStart,
+      socTarget || 100,
+      batteryKwh,
+      connectorPowerKw
+    );
+    return Math.min(maxMinutes, Math.round(calculatedDuration));
+  }
+
+  return maxMinutes;
 };
 
 // const computeSocAtStop = (session, elapsedMinutes) => {
@@ -125,6 +146,12 @@ const formatSessionPayload = (sessionDoc) => {
     minBalanceRequired: session.minBalanceRequired,
     pricing: session.pricing,
     billing: session.billing,
+    chargingPredictions: session.chargingPredictions || {
+      chargePercentageIn30Min: 0,
+      timeToFullChargeMinutes: null,
+      energyChargedKwh: 0,
+      energyRemainingKwh: 0,
+    },
   };
 };
 
@@ -216,7 +243,12 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     SESSION_SOC_RANDOM_MIN,
     SESSION_SOC_RANDOM_MAX
   );
-  const requestedChargeDuration = computeChargeDurationMinutes(socStart);
+  const requestedChargeDuration = computeChargeDurationMinutes(
+    socStart,
+    100,
+    batteryKwh,
+    connectorPowerKw
+  );
   const startedAt = now;
   const slotEnd = new Date(booking.slotEnd);
   const availableMinutes = Math.max(
@@ -230,6 +262,22 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
   const expectedFullAt = new Date(
     startedAt.getTime() + chargeDurationMinutes * 60 * 1000
   );
+
+  // Calculate charging predictions
+  const chargePercentageIn30Min =
+    batteryKwh && connectorPowerKw
+      ? calculateChargePercentageIn30Min(socStart, batteryKwh, connectorPowerKw)
+      : 0;
+
+  const timeToFullChargeMinutes =
+    batteryKwh && connectorPowerKw
+      ? calculateTimeToFullCharge(socStart, batteryKwh, connectorPowerKw)
+      : null;
+
+  const energyChargedKwh = 0; // Will be updated during charging
+  const energyRemainingKwh = batteryKwh
+    ? ((100 - socStart) / 100) * batteryKwh
+    : 0;
   const idleFeeNoticeAt =
     expectedFullAt < slotEnd
       ? new Date(
@@ -276,6 +324,12 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     minBalanceRequired: SESSION_MIN_BALANCE_BASE_VND,
     pricing: pricingSnapshot,
     billing: { currency: pricingSnapshot.currency },
+    chargingPredictions: {
+      chargePercentageIn30Min,
+      timeToFullChargeMinutes,
+      energyChargedKwh,
+      energyRemainingKwh,
+    },
   });
 
   const sessionPayload = formatSessionPayload(session);
@@ -358,7 +412,7 @@ exports.stopSession = asyncHandler(async (req, res) => {
   const finalizedSession = await completeSession(session, { stoppedAt: now });
   const payload = formatSessionPayload(finalizedSession);
   finalizeSessionBroadcast(payload);
-  
+
   const notices = [];
   if (finalizedSession.socEnd >= 100 && now < finalizedSession.slotEnd) {
     notices.push(
