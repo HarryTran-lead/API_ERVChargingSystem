@@ -23,6 +23,7 @@ const {
 } = require("../services/chargingMonitor");
 const bookingMonitor = require("../services/bookingMonitor");
 const { completeSession } = require("../services/sessionFinalizer");
+const { formatSessionDates } = require("../utils/timezoneHelpers");
 const {
   calculateChargeDurationFromSoc,
   calculateChargePercentageIn30Min,
@@ -122,7 +123,7 @@ const toPlainSession = (session) =>
   typeof session.toObject === "function" ? session.toObject() : session;
 
 const formatSessionPayload = (sessionDoc) => {
-  const session = toPlainSession(sessionDoc);
+  const session = formatSessionDates(toPlainSession(sessionDoc));
 
   return {
     _id: session._id?.toString(),

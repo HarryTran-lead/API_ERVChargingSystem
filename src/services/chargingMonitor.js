@@ -1,5 +1,6 @@
 const { completeSessionByReference } = require("./sessionFinalizer");
 const { calculateSocFromEnergy } = require("../utils/algorithms");
+const { formatToVietnamTime } = require("../utils/timezoneHelpers");
 
 const PROJECT_WINDOW_MINUTES = 30;
 const TICK_INTERVAL_MS = 1000;
@@ -99,7 +100,7 @@ const buildSnapshot = (entry, now = new Date()) => {
     sessionId: entry.sessionId,
     bookingId: entry.bookingId,
     connectorId: entry.connectorId,
-    startedAt: entry.startedAt.toISOString(),
+    startedAt: formatToVietnamTime(entry.startedAt),
     chargeDurationMinutes: parseNumber(entry.chargeDurationMinutes, null),
     elapsedSeconds,
     remainingSeconds,
@@ -127,7 +128,7 @@ const buildSnapshot = (entry, now = new Date()) => {
       energyRemainingKwh: Number(Math.max(0, energyRemainingKwh).toFixed(2)),
     },
     status: progress >= 1 ? "completed" : "charging",
-    updatedAt: now.toISOString(),
+    updatedAt: formatToVietnamTime(now),
   };
 
   if (entry.slotEnd) {
@@ -190,7 +191,7 @@ const startSessionBroadcast = (sessionPayload, context = {}) => {
   if (sessionPayload.slotEnd) {
     const slotEndDate = new Date(sessionPayload.slotEnd);
     if (!Number.isNaN(slotEndDate.getTime())) {
-      slotEndIso = slotEndDate.toISOString();
+      slotEndIso = formatToVietnamTime(slotEndDate);
     }
   }
 
@@ -374,7 +375,7 @@ const finalizeSessionBroadcast = (sessionPayload, overrides = {}) => {
     startedAt:
       sessionPayload?.startedAt ||
       cached.startedAt ||
-      entry?.startedAt?.toISOString() ||
+      formatToVietnamTime(entry?.startedAt) ||
       null,
     chargeDurationMinutes,
     elapsedSeconds,
@@ -419,15 +420,15 @@ const finalizeSessionBroadcast = (sessionPayload, overrides = {}) => {
       cached.totalIdleMinutes ??
       overrides.totalIdleMinutes ??
       0,
-    endedAt: now.toISOString(),
-    updatedAt: now.toISOString(),
+    endedAt: formatToVietnamTime(now),
+    updatedAt: formatToVietnamTime(now),
   };
 
   let finalSlotEnd = null;
   if (sessionPayload?.slotEnd) {
     const slotEndDate = new Date(sessionPayload.slotEnd);
     if (!Number.isNaN(slotEndDate.getTime())) {
-      finalSlotEnd = slotEndDate.toISOString();
+      finalSlotEnd = formatToVietnamTime(slotEndDate);
     }
   } else if (cached.slotEnd) {
     finalSlotEnd = cached.slotEnd;

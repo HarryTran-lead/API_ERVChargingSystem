@@ -4,6 +4,7 @@ const Invoice = require("../models/Invoice");
 const Wallet = require("../models/Wallet");
 const WalletTx = require("../models/WalletTransaction");
 const { ensureRequestUserId } = require("../utils/requestUser");
+const { formatInvoiceDates } = require("../utils/timezoneHelpers");
 
 exports.getInvoice = async (req, res) => {
   const inv = await Invoice.findOne({ id: req.params.id });
@@ -13,7 +14,7 @@ exports.getInvoice = async (req, res) => {
   if (req.user?.role === "driver" && inv.user_id !== req.user.id) {
     return res.status(403).json({ msg: "Forbidden" });
   }
-  res.json(inv);
+  res.json(formatInvoiceDates(inv));
 };
 
 // GET /api/v1/invoices/me?status=UNPAID|PAID|EXPIRED
@@ -23,7 +24,10 @@ exports.listMyInvoices = async (req, res) => {
   const q = { user_id: userId };
   if (status) q.payment_status = status;
   const invoices = await Invoice.find(q).sort({ createdAt: -1 }).lean();
-  res.json({ items: invoices });
+  const formattedInvoices = invoices.map((invoice) =>
+    formatInvoiceDates(invoice)
+  );
+  res.json({ items: formattedInvoices });
 };
 
 // POST /api/v1/invoices/:id/pay
@@ -38,7 +42,11 @@ exports.payInvoice = async (req, res) => {
     return res.status(400).json({ msg: "Invoice is not payable (status)" });
   }
   if (inv.payment_status === "PAID") {
-    return res.json({ ok: true, alreadyPaid: true, invoice: inv });
+    return res.json({
+      ok: true,
+      alreadyPaid: true,
+      invoice: formatInvoiceDates(inv),
+    });
   }
   if (inv.due_at && new Date(inv.due_at).getTime() < Date.now()) {
     await Invoice.updateOne(
@@ -132,5 +140,5 @@ exports.payInvoice = async (req, res) => {
   }
 
   const fresh = await Invoice.findOne({ id: inv.id });
-  return res.json({ ok: true, invoice: fresh });
+  return res.json({ ok: true, invoice: formatInvoiceDates(fresh) });
 };

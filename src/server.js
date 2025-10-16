@@ -1,4 +1,6 @@
 require("dotenv").config();
+// Fallback nếu không có TZ trong .env
+process.env.TZ = process.env.TZ || "Asia/Ho_Chi_Minh";
 const express = require("express");
 const http = require("http");
 const connectDB = require("./config/mongodb");

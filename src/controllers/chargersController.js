@@ -10,6 +10,10 @@ const { HttpError } = require("../utils/errors");
 const { ensureRequestUserId } = require("../utils/requestUser");
 const { BOOKING_STATUS } = require("../constants/enums");
 const { BOOKING_SLOT_MINUTES } = require("../constants/business");
+const {
+  formatBookingDates,
+  formatSessionDates,
+} = require("../utils/timezoneHelpers");
 
 exports.createCharger = asyncHandler(async (req, res) => {
   const { stationId, name, code, status, connectorType, powerKw } = req.body;
@@ -101,8 +105,8 @@ const toPlain = (doc) =>
   typeof doc?.toObject === "function"
     ? doc.toObject()
     : typeof doc?.toJSON === "function"
-    ? doc.toJSON()
-    : doc;
+      ? doc.toJSON()
+      : doc;
 
 const buildQrPayload = (token) => {
   if (!token) {
@@ -124,7 +128,7 @@ const formatSessionForScan = (sessionDoc) => {
     return null;
   }
 
-  const session = toPlain(sessionDoc);
+  const session = formatSessionDates(toPlain(sessionDoc));
 
   return {
     id: session._id?.toString(),
@@ -284,10 +288,10 @@ exports.getChargerScanDetails = asyncHandler(async (req, res) => {
       const estimatedFinishAt = finishAtFromSession
         ? finishAtFromSession
         : booking.slotStart
-        ? new Date(
-            new Date(booking.slotStart).getTime() + estimatedMinutes * 60000
-          )
-        : null;
+          ? new Date(
+              new Date(booking.slotStart).getTime() + estimatedMinutes * 60000
+            )
+          : null;
 
       const now = new Date();
       let estimatedRemainingMinutes = null;
@@ -331,13 +335,14 @@ exports.getChargerScanDetails = asyncHandler(async (req, res) => {
           c._id?.toString() === booking.connectorId.toString()
       );
 
+      const formattedBooking = formatBookingDates(booking);
       bookingPayload = {
         id: booking._id?.toString(),
         ref: booking.id,
         status: booking.status,
-        slotStart: booking.slotStart,
-        slotEnd: booking.slotEnd,
-        checkInDeadline: booking.checkInDeadline,
+        slotStart: formattedBooking.slotStart,
+        slotEnd: formattedBooking.slotEnd,
+        checkInDeadline: formattedBooking.checkInDeadline,
         estimatedChargeMinutes: estimatedMinutes,
         estimatedFinishAt,
         vehicleId: linkedVehicleDoc?.id || booking.vehicleId || undefined,
