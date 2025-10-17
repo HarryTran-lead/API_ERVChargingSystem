@@ -40,6 +40,11 @@ app.use("/api/v1/bookings", require("./routes/v1/bookingsRoutes"));
 app.use("/api/v1/sessions", require("./routes/v1/sessionsRoutes"));
 app.use("/api/v1/vehicles", require("./routes/v1/vehicleRoutes"));
 app.use("/api/v1/chargers", require("./routes/v1/chargersRoutes"));
+// app.js hoặc server.js
+app.use('/api/v1/memberships', require('./routes/v1/memberships'));
+// ... các require & middlewares khác
+app.use('/api/v1/admin/membership-plans', require('./routes/v1/adminMembershipPlans'));
+
 app.use("/api/v1/analytics", require("./routes/v1/analyticsRoutes"));
 app.use("/api/v1/invoices", require("./routes/v1/invoiceRoutes"));
 
