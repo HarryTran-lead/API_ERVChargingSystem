@@ -86,6 +86,58 @@ exports.createBooking = asyncHandler(async (req, res) => {
     );
   }
 
+  // Kiểm tra user có booking đang active không (trừ slot liên tiếp)
+  const userActiveBookings = await Booking.find({
+    userId,
+    status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
+  }).lean();
+
+  if (userActiveBookings.length > 0) {
+    // Kiểm tra xem có phải slot liên tiếp không
+    const isConsecutiveSlot = userActiveBookings.some((booking) => {
+      const bookingEnd = new Date(booking.slotEnd);
+      const newStart = normalizedStart;
+
+      // Cho phép slot liên tiếp (cách nhau tối đa 5 phút)
+      const timeDiff = Math.abs(newStart.getTime() - bookingEnd.getTime());
+      return timeDiff <= 5 * 60 * 1000; // 5 phút
+    });
+
+    if (!isConsecutiveSlot) {
+      throw new HttpError(
+        409,
+        "You already have an active booking. Only consecutive slots are allowed."
+      );
+    }
+
+    // Kiểm tra không quá 2 slot liên tiếp
+    if (userActiveBookings.length >= 2) {
+      throw new HttpError(
+        409,
+        "You can only book maximum 2 consecutive slots."
+      );
+    }
+  }
+
+  // Kiểm tra giới hạn 3 slot trong 1 ngày
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  const todayBookings = await Booking.countDocuments({
+    userId,
+    slotStart: { $gte: today, $lt: tomorrow },
+    status: { $ne: BOOKING_STATUS.CANCELLED },
+  });
+
+  if (todayBookings >= 3) {
+    throw new HttpError(
+      429,
+      "Daily limit reached. You can only book 3 slots per day."
+    );
+  }
+
   const slotEnd = new Date(
     normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60 * 1000
   );
