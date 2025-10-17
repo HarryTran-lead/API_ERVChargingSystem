@@ -2,6 +2,7 @@ const EventEmitter = require("events");
 const Booking = require("../models/Booking");
 const Connector = require("../models/Connector");
 const { BOOKING_STATUS } = require("../constants/enums");
+const { formatBookingDates } = require("../utils/timezoneHelpers");
 
 const scheduledJobs = new Map();
 const schedulerEvents = new EventEmitter();
@@ -21,7 +22,7 @@ const autoCancelBooking = async (bookingId) => {
       { status: "IDLE" }
     );
 
-    schedulerEvents.emit("autoCancelled", booking.toObject());
+    schedulerEvents.emit("autoCancelled", formatBookingDates(booking));
 
     return booking;
   } catch (err) {
