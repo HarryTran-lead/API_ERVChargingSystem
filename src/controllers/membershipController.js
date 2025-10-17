@@ -118,3 +118,38 @@ exports.purchase = asyncHandler(async (req, res) => {
 
   return res.status(201).json({ ok: true, plan: plan.code, months, cost });
 });
+// GET /api/v1/memberships/plans  -> driver xem tất cả gói đang bán
+exports.listPlansForUser = asyncHandler(async (req, res) => {
+  const userId = ensureRequestUserId(req);
+
+  const [plans, um] = await Promise.all([
+    MembershipPlan
+      .find({ status: 'ACTIVE' })
+      .select('code name monthly_fee_vnd mods')   // chỉ field cần cho UI
+      .sort({ monthly_fee_vnd: 1 })
+      .lean(),
+    UserMembership.findOne({ user_id: userId }).lean()
+  ]);
+
+  res.json({
+    current: um?.plan_code || 'FREE',
+    plans   : plans.map(p => ({
+      code: p.code,
+      name: p.name,
+      monthly_fee_vnd: p.monthly_fee_vnd,
+      mods: p.mods, // nếu muốn rút gọn có thể chỉ chọn vài key quan trọng
+      isCurrent: um?.plan_code === p.code
+    }))
+  });
+});
+
+// (tuỳ chọn) GET /api/v1/memberships/plans/:code  -> xem chi tiết 1 gói
+exports.getPlanPublic = asyncHandler(async (req, res) => {
+  const code = String(req.params.code || '').toUpperCase().trim();
+  const plan = await MembershipPlan
+    .findOne({ code, status: 'ACTIVE' })
+    .select('code name monthly_fee_vnd mods')
+    .lean();
+  if (!plan) throw new HttpError(404, 'Plan not found');
+  res.json(plan);
+});
