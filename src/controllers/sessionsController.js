@@ -3,6 +3,7 @@ const Booking = require("../models/Booking");
 const Connector = require("../models/Connector");
 const Vehicle = require("../models/Vehicle");
 const Session = require("../models/Session");
+const Tariff = require("../models/Tariff");
 const Wallet = require("../models/Wallet");
 const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
@@ -20,9 +21,20 @@ const {
   startSessionBroadcast,
   finalizeSessionBroadcast,
 } = require("../services/chargingMonitor");
+const bookingMonitor = require("../services/bookingMonitor");
+const { completeSession } = require("../services/sessionFinalizer");
+const { formatSessionDates } = require("../utils/timezoneHelpers");
+const {
+  calculateChargeDurationFromSoc,
+  calculateChargePercentageIn30Min,
+  calculateTimeToFullCharge,
+} = require("../utils/algorithms");
 const randomIntInclusive = (min, max) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
-
+const toNumber = (value, fallback = 0) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
 const buildBookingQuery = (userId, reference) => {
   const query = {
     userId,
@@ -63,39 +75,55 @@ const resolveConfiguredChargeDurationMinutes = () => {
   return parsed;
 };
 
-const computeChargeDurationMinutes = () => {
+const computeChargeDurationMinutes = (
+  socStart,
+  socTarget,
+  batteryKwh,
+  connectorPowerKw
+) => {
   const configured = resolveConfiguredChargeDurationMinutes();
   const maxMinutes = BOOKING_SLOT_MINUTES;
-  
 
+  // If configured for testing, use the configured value
   if (configured) {
     return Math.min(maxMinutes, Math.round(configured));
   }
 
-   return maxMinutes;
-};
-
-const computeSocAtStop = (session, elapsedMinutes) => {
-  if (!session.chargeDurationMinutes || session.chargeDurationMinutes <= 0) {
-    return 100;
+  // Calculate actual duration based on battery and connector specs
+  if (batteryKwh && connectorPowerKw) {
+    const calculatedDuration = calculateChargeDurationFromSoc(
+      socStart,
+      socTarget || 100,
+      batteryKwh,
+      connectorPowerKw
+    );
+    return Math.min(maxMinutes, Math.round(calculatedDuration));
   }
 
-  const chargingMinutes = Math.min(
-    elapsedMinutes,
-    session.chargeDurationMinutes
-  );
-
-  const progress = Math.min(1, chargingMinutes / session.chargeDurationMinutes);
-
-  const socDelta = (100 - session.socStart) * progress;
-  return Math.min(100, Number((session.socStart + socDelta).toFixed(1)));
+  return maxMinutes;
 };
+
+// const computeSocAtStop = (session, elapsedMinutes) => {
+//   if (!session.chargeDurationMinutes || session.chargeDurationMinutes <= 0) {
+//     return 100;
+//   }
+
+//   const chargingMinutes = Math.min(
+//     elapsedMinutes,
+//     session.chargeDurationMinutes
+//   );
+
+//   const progress = Math.min(1, chargingMinutes / session.chargeDurationMinutes);
+
+//   const socDelta = (100 - session.socStart) * progress;
+//   return Math.min(100, Number((session.socStart + socDelta).toFixed(1)));
+// };
 
 const toPlainSession = (session) =>
   typeof session.toObject === "function" ? session.toObject() : session;
 
 const formatSessionPayload = (sessionDoc) => {
-  const session = toPlainSession(sessionDoc);
+  const session = formatSessionDates(toPlainSession(sessionDoc));
 
   return {
     _id: session._id?.toString(),
@@ -117,6 +145,14 @@ const formatSessionPayload = (sessionDoc) => {
     totalIdleMinutes: session.totalIdleMinutes,
     idleFeeIntervalsApplied: session.idleFeeIntervalsApplied,
     minBalanceRequired: session.minBalanceRequired,
+    pricing: session.pricing,
+    billing: session.billing,
+    chargingPredictions: session.chargingPredictions || {
+      chargePercentageIn30Min: 0,
+      timeToFullChargeMinutes: null,
+      energyChargedKwh: 0,
+      energyRemainingKwh: 0,
+    },
   };
 };
 
@@ -138,9 +174,9 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
   }
 
   const now = new Date();
-  if (now < new Date(booking.slotStart)) {
-    throw new HttpError(409, "Cannot start charging before the reserved slot");
-  }
+  // if (now < new Date(booking.slotStart)) {
+  //   throw new HttpError(409, "Cannot start charging before the reserved slot");
+  // }
 
   if (now > new Date(booking.checkInDeadline)) {
     throw new HttpError(409, "Booking check-in window has expired");
@@ -208,7 +244,12 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     SESSION_SOC_RANDOM_MIN,
     SESSION_SOC_RANDOM_MAX
   );
-  const requestedChargeDuration = computeChargeDurationMinutes(socStart);
+  const requestedChargeDuration = computeChargeDurationMinutes(
+    socStart,
+    100,
+    batteryKwh,
+    connectorPowerKw
+  );
   const startedAt = now;
   const slotEnd = new Date(booking.slotEnd);
   const availableMinutes = Math.max(
@@ -222,6 +263,22 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
   const expectedFullAt = new Date(
     startedAt.getTime() + chargeDurationMinutes * 60 * 1000
   );
+
+  // Calculate charging predictions
+  const chargePercentageIn30Min =
+    batteryKwh && connectorPowerKw
+      ? calculateChargePercentageIn30Min(socStart, batteryKwh, connectorPowerKw)
+      : 0;
+
+  const timeToFullChargeMinutes =
+    batteryKwh && connectorPowerKw
+      ? calculateTimeToFullCharge(socStart, batteryKwh, connectorPowerKw)
+      : null;
+
+  const energyChargedKwh = 0; // Will be updated during charging
+  const energyRemainingKwh = batteryKwh
+    ? ((100 - socStart) / 100) * batteryKwh
+    : 0;
   const idleFeeNoticeAt =
     expectedFullAt < slotEnd
       ? new Date(
@@ -229,7 +286,27 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
             SESSION_IDLE_FEE_INTERVAL_MINUTES * 60 * 1000
         )
       : null;
+  const tariff = await Tariff.findEffectiveAt(
+    booking.stationId,
+    connector.type,
+    startedAt
+  );
 
+  const pricingSnapshot = tariff
+    ? {
+        tariffId: tariff._id,
+        mode: tariff.mode,
+        connectorType: tariff.connectorType,
+        pricePerMin: toNumber(tariff.pricePerMin, 0),
+        idleFeePerMin: toNumber(tariff.idleFeePerMin, 0),
+        pricePerKwh: toNumber(tariff.pricePerKwh, 0),
+        graceMin: toNumber(tariff.graceMin, 0),
+        currency: "VND",
+        effectiveFrom: tariff.effectiveFrom,
+      }
+    : {
+        currency: "VND",
+      };
   const session = await Session.create({
     bookingId: booking._id,
     bookingRef: booking.id,
@@ -246,6 +323,14 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     chargeDurationMinutes,
     idleFeeIntervalMinutes: SESSION_IDLE_FEE_INTERVAL_MINUTES,
     minBalanceRequired: SESSION_MIN_BALANCE_BASE_VND,
+    pricing: pricingSnapshot,
+    billing: { currency: pricingSnapshot.currency },
+    chargingPredictions: {
+      chargePercentageIn30Min,
+      timeToFullChargeMinutes,
+      energyChargedKwh,
+      energyRemainingKwh,
+    },
   });
 
   const sessionPayload = formatSessionPayload(session);
@@ -288,54 +373,56 @@ exports.stopSession = asyncHandler(async (req, res) => {
   }
 
   const now = new Date();
-  const elapsedMinutes = (now.getTime() - session.startedAt.getTime()) / 60000;
-  const socEnd = computeSocAtStop(session, elapsedMinutes);
-  const totalChargingMinutes = Math.min(
-    elapsedMinutes,
-    session.chargeDurationMinutes
-  );
-  const totalIdleMinutes = Math.max(
-    0,
-    elapsedMinutes - session.chargeDurationMinutes
-  );
-  const idleFeeIntervalsApplied = Math.floor(
-    totalIdleMinutes / session.idleFeeIntervalMinutes
-  );
+  // const elapsedMinutes = (now.getTime() - session.startedAt.getTime()) / 60000;
+  // const socEnd = computeSocAtStop(session, elapsedMinutes);
+  // const totalChargingMinutes = Math.min(
+  //   elapsedMinutes,
+  //   session.chargeDurationMinutes
+  // );
+  // const totalIdleMinutes = Math.max(
+  //   0,
+  //   elapsedMinutes - session.chargeDurationMinutes
+  // );
+  // const idleFeeIntervalsApplied = Math.floor(
+  //   totalIdleMinutes / session.idleFeeIntervalMinutes
+  // );
 
-  session.status = SESSION_STATUS.COMPLETED;
-  session.socEnd = socEnd;
-  session.stoppedAt = now;
-  session.totalChargingMinutes = Number(totalChargingMinutes.toFixed(1));
-  session.totalIdleMinutes = Number(totalIdleMinutes.toFixed(1));
-  session.idleFeeIntervalsApplied = idleFeeIntervalsApplied;
+  // session.status = SESSION_STATUS.COMPLETED;
+  // session.socEnd = socEnd;
+  // session.stoppedAt = now;
+  // session.totalChargingMinutes = Number(totalChargingMinutes.toFixed(1));
+  // session.totalIdleMinutes = Number(totalIdleMinutes.toFixed(1));
+  // session.idleFeeIntervalsApplied = idleFeeIntervalsApplied;
 
-  await session.save();
+  // await session.save();
 
-  await Connector.findByIdAndUpdate(session.connectorId, { status: "IDLE" });
-  const updatedBooking = await Booking.findByIdAndUpdate(
-    session.bookingId,
-    {
-      status: BOOKING_STATUS.COMPLETED,
-    },
-    { new: true }
-  );
+  // await Connector.findByIdAndUpdate(session.connectorId, { status: "IDLE" });
+  // const updatedBooking = await Booking.findByIdAndUpdate(
+  //   session.bookingId,
+  //   {
+  //     status: BOOKING_STATUS.COMPLETED,
+  //   },
+  //   { new: true }
+  // );
 
-  if (updatedBooking) {
-    bookingMonitor.syncBooking(updatedBooking);
-  }
+  // if (updatedBooking) {
+  //   bookingMonitor.syncBooking(updatedBooking);
+  // }
 
-  const payload = formatSessionPayload(session);
+  // const payload = formatSessionPayload(session);
+  const finalizedSession = await completeSession(session, { stoppedAt: now });
+  const payload = formatSessionPayload(finalizedSession);
   finalizeSessionBroadcast(payload);
-  
+
   const notices = [];
-  if (socEnd >= 100 && now < session.slotEnd) {
+  if (finalizedSession.socEnd >= 100 && now < finalizedSession.slotEnd) {
     notices.push(
       "Vehicle hit 100% before the slot ended. Please free the connector for the next driver."
     );
   }
-  if (idleFeeIntervalsApplied > 0) {
+  if (finalizedSession.idleFeeIntervalsApplied > 0) {
     notices.push(
-      `Idle fees apply for ${idleFeeIntervalsApplied} interval(s) of ${SESSION_IDLE_FEE_INTERVAL_MINUTES} minutes.`
+      `Idle fees apply for ${finalizedSession.idleFeeIntervalsApplied} interval(s) of ${SESSION_IDLE_FEE_INTERVAL_MINUTES} minutes.`
     );
   }
 

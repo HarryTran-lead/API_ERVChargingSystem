@@ -1,6 +1,7 @@
 const Booking = require("../models/Booking");
 const { BOOKING_STATUS } = require("../constants/enums");
 const { autoCancelBooking, schedulerEvents } = require("./bookingScheduler");
+const { formatBookingDates } = require("../utils/timezoneHelpers");
 
 const TICK_INTERVAL_MS = 1000;
 
@@ -27,12 +28,12 @@ const normalizeId = (value) => {
 const toPlainBooking = (booking) => {
   if (!booking) return null;
   if (typeof booking.toObject === "function") {
-    return booking.toObject();
+    return formatBookingDates(booking.toObject());
   }
   if (booking._doc) {
-    return { ...booking._doc };
+    return formatBookingDates({ ...booking._doc });
   }
-  return { ...booking };
+  return formatBookingDates({ ...booking });
 };
 
 const parseDate = (input) => {
