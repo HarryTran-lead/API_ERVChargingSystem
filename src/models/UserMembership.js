@@ -16,5 +16,6 @@ const userMembershipSchema = new mongoose.Schema({
 
   created_at: { type: Date, default: Date.now }
 });
+userMembershipSchema.index({ user_id: 1 }, { unique: true });
 
 module.exports = mongoose.model('UserMembership', userMembershipSchema);
