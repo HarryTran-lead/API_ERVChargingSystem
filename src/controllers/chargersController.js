@@ -45,7 +45,29 @@ exports.listChargers = asyncHandler(async (req, res) => {
     .limit(Number(limit))
     .lean();
 
-  res.json(chargers);
+  // Lấy tất cả connectors cho các chargers
+  const chargerIds = chargers.map((charger) => charger._id);
+  const connectors = await Connector.find({
+    chargerId: { $in: chargerIds },
+  }).lean();
+
+  // Nhóm connectors theo chargerId
+  const connectorsByCharger = {};
+  connectors.forEach((connector) => {
+    const chargerId = connector.chargerId.toString();
+    if (!connectorsByCharger[chargerId]) {
+      connectorsByCharger[chargerId] = [];
+    }
+    connectorsByCharger[chargerId].push(connector);
+  });
+
+  // Thêm connectors vào mỗi charger
+  const chargersWithConnectors = chargers.map((charger) => ({
+    ...charger,
+    connectors: connectorsByCharger[charger._id.toString()] || [],
+  }));
+
+  res.json(chargersWithConnectors);
 });
 
 exports.getCharger = asyncHandler(async (req, res) => {
@@ -53,7 +75,17 @@ exports.getCharger = asyncHandler(async (req, res) => {
   if (!charger) {
     throw new HttpError(404, "Charger not found");
   }
-  res.json(charger);
+
+  // Lấy tất cả connectors của charger này
+  const connectors = await Connector.find({ chargerId: charger._id }).lean();
+
+  // Thêm connectors vào charger
+  const chargerWithConnectors = {
+    ...charger,
+    connectors: connectors,
+  };
+
+  res.json(chargerWithConnectors);
 });
 
 exports.updateCharger = asyncHandler(async (req, res) => {
