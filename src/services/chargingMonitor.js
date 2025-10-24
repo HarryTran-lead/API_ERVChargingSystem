@@ -4,6 +4,9 @@ const { formatToVietnamTime } = require("../utils/timezoneHelpers");
 
 const PROJECT_WINDOW_MINUTES = 30;
 const TICK_INTERVAL_MS = 1000;
+const PREPARE_TO_DISCONNECT_THRESHOLD = 0.7;
+const PREPARE_TO_DISCONNECT_NOTICE =
+  "Charging has reached 70% completion. Please prepare to unplug to free the connector.";
 
 const activeSessions = new Map();
 const snapshotCache = new Map();
@@ -129,6 +132,7 @@ const buildSnapshot = (entry, now = new Date()) => {
     },
     status: progress >= 1 ? "completed" : "charging",
     updatedAt: formatToVietnamTime(now),
+    progress,
   };
 
   if (entry.slotEnd) {
@@ -173,6 +177,26 @@ const cancelActiveInterval = (sessionId) => {
   return entry || null;
 };
 
+const attachMilestoneNotices = (snapshot, entry) => {
+  if (!snapshot || !entry) {
+    return snapshot;
+  }
+
+  if (
+    !entry.prepNoticeSent &&
+    snapshot.progress !== undefined &&
+    snapshot.progress >= PREPARE_TO_DISCONNECT_THRESHOLD
+  ) {
+    snapshot.notices = [
+      ...(snapshot.notices || []),
+      PREPARE_TO_DISCONNECT_NOTICE,
+    ];
+    entry.prepNoticeSent = true;
+  }
+
+  return snapshot;
+};
+
 const startSessionBroadcast = (sessionPayload, context = {}) => {
   const sessionId =
     sessionPayload?._id || sessionPayload?.id || sessionPayload?.sessionId;
@@ -213,11 +237,11 @@ const startSessionBroadcast = (sessionPayload, context = {}) => {
 
   cancelActiveInterval(entry.sessionId);
 
-  const initialSnapshot = buildSnapshot(entry);
+  const initialSnapshot = attachMilestoneNotices(buildSnapshot(entry), entry);
   emitSnapshot(initialSnapshot);
 
   const interval = setInterval(() => {
-    const nextSnapshot = buildSnapshot(entry);
+    const nextSnapshot = attachMilestoneNotices(buildSnapshot(entry), entry);
     emitSnapshot(nextSnapshot);
 
     if (nextSnapshot.status === "completed") {

@@ -82,7 +82,9 @@ async function completeSession(session, options = {}) {
     return null;
   }
 
-  if (session.status !== SESSION_STATUS.CHARGING) {
+  const eligibleStatuses = [SESSION_STATUS.CHARGING, SESSION_STATUS.COMPLETED];
+
+  if (!eligibleStatuses.includes(session.status)) {
     return session;
   }
 
@@ -128,7 +130,9 @@ async function completeSession(session, options = {}) {
   const totalIdleMinutes = Math.max(0, elapsedMinutes - chargeDuration);
   const idleIntervalRaw = toNumber(session.idleFeeIntervalMinutes, 0);
   const idleFeeIntervalsApplied =
-    idleIntervalRaw > 0 ? Math.floor(totalIdleMinutes / idleIntervalRaw) : 0;
+    idleIntervalRaw > 0 && totalIdleMinutes > 0
+      ? Math.ceil(totalIdleMinutes / idleIntervalRaw)
+      : 0;
 
   session.status = SESSION_STATUS.COMPLETED;
   session.socEnd = socEnd;
@@ -148,8 +152,8 @@ async function completeSession(session, options = {}) {
     typeof pricingModeRaw === "string"
       ? pricingModeRaw.toLowerCase()
       : undefined;
-  const billableIdleMinutesRaw = Math.max(0, normalizedIdleMinutes - graceMin);
-  const billableIdleMinutes = Number(billableIdleMinutesRaw.toFixed(1));
+  // Bỏ graceMin - tính phí idle ngay khi sạc completed
+  const billableIdleMinutes = Number(normalizedIdleMinutes.toFixed(1));
 
   let energyKwh = null;
   if (connectorPowerKw > 0 && normalizedChargingMinutes > 0) {
@@ -277,7 +281,9 @@ async function completeSessionByReference(reference, options = {}) {
     return null;
   }
 
-  if (session.status !== SESSION_STATUS.CHARGING) {
+  const eligibleStatuses = [SESSION_STATUS.CHARGING, SESSION_STATUS.COMPLETED];
+
+  if (!eligibleStatuses.includes(session.status)) {
     return session;
   }
 

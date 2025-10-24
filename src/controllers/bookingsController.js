@@ -17,6 +17,8 @@ const {
 } = require("../services/bookingScheduler");
 const bookingMonitor = require("../services/bookingMonitor");
 const { formatBookingDates } = require("../utils/timezoneHelpers");
+const Station = require("../models/Station");
+const Tariff = require("../models/Tariff");
 
 const toMinutes = (ms) => ms / (60 * 1000);
 
@@ -256,5 +258,143 @@ exports.cancelBooking = asyncHandler(async (req, res) => {
   res.json({
     message: "Booking cancelled successfully",
     booking: formatBookingDates(booking),
+  });
+});
+
+// GET /api/v1/bookings/available-slots
+exports.getAvailableSlots = asyncHandler(async (req, res) => {
+  const {
+    stationId,
+    date,
+    connectorType,
+    duration = BOOKING_SLOT_MINUTES,
+  } = req.query;
+
+  if (!stationId) {
+    throw new HttpError(400, "stationId is required");
+  }
+
+  // Parse date (default to today if not provided)
+  const targetDate = date ? new Date(date) : new Date();
+  if (Number.isNaN(targetDate.getTime())) {
+    throw new HttpError(400, "Invalid date format");
+  }
+
+  // Set time range for the day (00:00 to 23:59)
+  const startOfDay = new Date(targetDate);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const endOfDay = new Date(targetDate);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  // Get all connectors for the station
+  const connectorFilter = {
+    stationId,
+    status: "IDLE",
+  };
+
+  if (connectorType) {
+    connectorFilter.type = connectorType;
+  }
+
+  const connectors = await Connector.find(connectorFilter)
+    .populate("stationId", "name lat lng status")
+    .lean();
+
+  if (connectors.length === 0) {
+    return res.json({
+      message: "No available connectors found",
+      availableSlots: [],
+      date: targetDate.toISOString().split("T")[0],
+    });
+  }
+
+  // Get all existing bookings for the day
+  const existingBookings = await Booking.find({
+    stationId,
+    status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
+    slotStart: { $gte: startOfDay, $lte: endOfDay },
+  }).lean();
+
+  // Generate time slots (every 30 minutes from 6 AM to 10 PM)
+  const slots = [];
+  const slotStartHour = 6; // 6 AM
+  const slotEndHour = 22; // 10 PM
+
+  for (let hour = slotStartHour; hour < slotEndHour; hour++) {
+    for (let minute = 0; minute < 60; minute += 30) {
+      const slotStart = new Date(targetDate);
+      slotStart.setHours(hour, minute, 0, 0);
+
+      const slotEnd = new Date(slotStart);
+      slotEnd.setMinutes(slotEnd.getMinutes() + duration);
+
+      // Skip if slot is in the past
+      if (slotStart < new Date()) {
+        continue;
+      }
+
+      // Check availability for each connector
+      const availableConnectors = [];
+
+      for (const connector of connectors) {
+        // Check if this connector has any overlapping bookings
+        const hasOverlap = existingBookings.some((booking) => {
+          return (
+            booking.connectorId.toString() === connector._id.toString() &&
+            booking.slotStart < slotEnd &&
+            new Date(booking.slotEnd) > slotStart
+          );
+        });
+
+        if (!hasOverlap) {
+          // Get tariff for this connector
+          const tariff = await Tariff.findEffectiveAt(
+            stationId,
+            connector.type,
+            slotStart
+          );
+
+          availableConnectors.push({
+            connectorId: connector._id,
+            connectorCode: connector.code,
+            type: connector.type,
+            powerKw: connector.powerKw,
+            pricing: tariff
+              ? {
+                  pricePerMin: tariff.pricePerMin,
+                  pricePerKwh: tariff.pricePerKwh,
+                  idleFeePerMin: tariff.idleFeePerMin,
+                  currency: "VND",
+                  mode: tariff.mode,
+                }
+              : null,
+          });
+        }
+      }
+
+      if (availableConnectors.length > 0) {
+        slots.push({
+          slotStart: slotStart.toISOString(),
+          slotEnd: slotEnd.toISOString(),
+          duration: duration,
+          availableConnectors: availableConnectors,
+          station: {
+            id: connectors[0].stationId._id,
+            name: connectors[0].stationId.name,
+            lat: connectors[0].stationId.lat,
+            lng: connectors[0].stationId.lng,
+            status: connectors[0].stationId.status,
+          },
+        });
+      }
+    }
+  }
+
+  res.json({
+    message: "Available slots retrieved successfully",
+    date: targetDate.toISOString().split("T")[0],
+    totalSlots: slots.length,
+    availableSlots: slots,
   });
 });

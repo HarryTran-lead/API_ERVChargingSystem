@@ -279,13 +279,7 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
   const energyRemainingKwh = batteryKwh
     ? ((100 - socStart) / 100) * batteryKwh
     : 0;
-  const idleFeeNoticeAt =
-    expectedFullAt < slotEnd
-      ? new Date(
-          expectedFullAt.getTime() +
-            SESSION_IDLE_FEE_INTERVAL_MINUTES * 60 * 1000
-        )
-      : null;
+  const idleFeeNoticeAt = expectedFullAt < slotEnd ? expectedFullAt : null;
   const tariff = await Tariff.findEffectiveAt(
     booking.stationId,
     connector.type,
@@ -364,8 +358,13 @@ exports.stopSession = asyncHandler(async (req, res) => {
     throw new HttpError(404, "Session not found");
   }
 
-  if (session.status !== SESSION_STATUS.CHARGING) {
-    throw new HttpError(409, "Session is not currently charging");
+  const stoppableStatuses = [
+    SESSION_STATUS.CHARGING,
+    SESSION_STATUS.COMPLETED,
+  ];
+
+  if (!stoppableStatuses.includes(session.status)) {
+    throw new HttpError(409, "Session cannot be stopped in its current state");
   }
 
   if (!session.startedAt) {
