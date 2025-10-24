@@ -1,7 +1,11 @@
 const Station = require("../models/Station");
 const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
+const Charger = require("../models/Charger");
+const Connector = require("../models/Connector");
+const mongoose = require("mongoose");
 
+const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
 exports.createStation = asyncHandler(async (req, res) => {
   const { name, lat, lng, status } = req.body;
   if (typeof lat !== "number" || typeof lng !== "number") {
@@ -66,6 +70,63 @@ exports.updateStation = asyncHandler(async (req, res) => {
   if (!st) throw new HttpError(404, "Station not found");
   res.json(st);
 });
+
+exports.listStationsWithAssets = asyncHandler(async (req, res) => {
+  const { status } = req.query;
+  const filter = {};
+
+  if (status) {
+    filter.status = status;
+  }
+
+  const stations = await Station.find(filter).lean();
+
+  if (stations.length === 0) {
+    res.json([]);
+    return;
+  }
+
+  const stationIds = stations.map((st) => st._id);
+
+  const chargers = await Charger.find({
+    stationId: { $in: stationIds },
+  }).lean();
+
+  const chargerIds = chargers.map((charger) => charger._id);
+
+  const connectors = chargerIds.length
+    ? await Connector.find({ chargerId: { $in: chargerIds } }).lean()
+    : [];
+
+  const connectorsByCharger = connectors.reduce((acc, connector) => {
+    const chargerId = connector.chargerId?.toString();
+    if (!chargerId) return acc;
+    if (!acc[chargerId]) acc[chargerId] = [];
+    acc[chargerId].push(connector);
+    return acc;
+  }, {});
+
+  const chargersByStation = chargers.reduce((acc, charger) => {
+    const stationId = charger.stationId?.toString();
+    if (!stationId) return acc;
+    if (!acc[stationId]) acc[stationId] = [];
+    acc[stationId].push({
+      ...charger,
+      connectors: connectorsByCharger[charger._id.toString()] || [],
+    });
+    return acc;
+  }, {});
+
+  const result = stations.map((station) => ({
+    ...station,
+    chargers: chargersByStation[station._id.toString()] || [],
+  }));
+
+  res.json(result);
+});
+
+
+
 
 exports.deleteStation = asyncHandler(async (req, res) => {
   const done = await Station.findByIdAndDelete(req.params.id);
