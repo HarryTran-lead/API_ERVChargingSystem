@@ -38,6 +38,8 @@ app.use('/api/v1/bookings', require('./routes/v1/bookingsRoutes'));
 app.use('/api/v1/sessions', require('./routes/v1/sessionsRoutes'));
 app.use('/api/v1/vehicles', require('./routes/v1/vehicleRoutes'));
 app.use("/api/v1/chargers", require("./routes/v1/chargersRoutes"));
+app.use('/api/v1/feedbacks', require('./routes/v1/feedbackRoutes'));
+
 
 
 app.use((req, res) => {
