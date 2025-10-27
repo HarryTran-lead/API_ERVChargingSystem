@@ -18,7 +18,7 @@ const TariffSchema = new mongoose.Schema(
     pricePerKwh: { type: Number, required: true, min: 0, default: 0 }, // VND/kWh
     pricePerMin: { type: Number, required: true, min: 0, default: 0 }, // VND/min
     idleFeePerMin: { type: Number, required: true, min: 0, default: 0 }, // VND/min
-    graceMin: { type: Number, required: true, min: 0, default: 5 },
+    graceMin: { type: Number, required: true, min: 0, default: 0 },
     active: { type: Boolean, default: true, index: true },
     effectiveFrom: { type: Date, required: true, index: true },
   },

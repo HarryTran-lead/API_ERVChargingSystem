@@ -1,7 +1,8 @@
 // src/controllers/vehicleController.js
-const mongoose = require('mongoose');
-const Vehicle = require('../models/Vehicle');
-const { ensureRequestUserId } = require('../utils/requestUser');
+const mongoose = require("mongoose");
+const Vehicle = require("../models/Vehicle");
+const { ensureRequestUserId } = require("../utils/requestUser");
+const { formatVehicleDates } = require("../utils/timezoneHelpers");
 
 // Map lỗi duplicate index → thông báo dễ hiểu
 function parseDup(err) {
@@ -10,14 +11,14 @@ function parseDup(err) {
       return {
         status: 409,
         body: {
-          error: 'DUPLICATE_LICENSE_PLATE',
-          message: 'Biển số đã tồn tại cho user này.',
+          error: "DUPLICATE_LICENSE_PLATE",
+          message: "Biển số đã tồn tại cho user này.",
         },
       };
     }
     return {
       status: 409,
-      body: { error: 'DUPLICATE_KEY', message: 'Dữ liệu trùng lặp.' },
+      body: { error: "DUPLICATE_KEY", message: "Dữ liệu trùng lặp." },
     };
   }
   return null;
@@ -50,13 +51,13 @@ exports.create = async (req, res) => {
       is_default: !!isDefault, // pre('save') sẽ unset default cũ nếu cần
     });
 
-    return res.status(201).json({ data: v });
+    return res.status(201).json({ data: formatVehicleDates(v) });
   } catch (err) {
     const dup = parseDup(err);
     if (dup) return res.status(dup.status).json(dup.body);
     return res
       .status(400)
-      .json({ error: 'CREATE_VEHICLE_FAILED', detail: err.message });
+      .json({ error: "CREATE_VEHICLE_FAILED", detail: err.message });
   }
 };
 
@@ -67,11 +68,12 @@ exports.listMine = async (req, res) => {
     const list = await Vehicle.find({ user_id: userId, deleted_at: null })
       .sort({ is_default: -1, created_at: -1 })
       .lean();
-    return res.json({ data: list });
+    const formattedList = list.map((vehicle) => formatVehicleDates(vehicle));
+    return res.json({ data: formattedList });
   } catch (err) {
     return res
       .status(500)
-      .json({ error: 'LIST_VEHICLES_FAILED', detail: err.message });
+      .json({ error: "LIST_VEHICLES_FAILED", detail: err.message });
   }
 };
 
@@ -92,12 +94,12 @@ exports.getOne = async (req, res) => {
       $or: or,
     });
 
-    if (!v) return res.status(404).json({ error: 'VEHICLE_NOT_FOUND' });
-    return res.json({ data: v });
+    if (!v) return res.status(404).json({ error: "VEHICLE_NOT_FOUND" });
+    return res.json({ data: formatVehicleDates(v) });
   } catch (err) {
     return res
       .status(500)
-      .json({ error: 'GET_VEHICLE_FAILED', detail: err.message });
+      .json({ error: "GET_VEHICLE_FAILED", detail: err.message });
   }
 };
 
@@ -118,7 +120,7 @@ exports.update = async (req, res) => {
       deleted_at: null,
       $or: findOr,
     });
-    if (!v) return res.status(404).json({ error: 'VEHICLE_NOT_FOUND' });
+    if (!v) return res.status(404).json({ error: "VEHICLE_NOT_FOUND" });
 
     const {
       licensePlate,
@@ -141,13 +143,13 @@ exports.update = async (req, res) => {
     if (isDefault != null) v.is_default = !!isDefault; // pre('save') sẽ unset default cũ
 
     await v.save(); // chạy validate + pre-save (unset default cũ nếu cần)
-    return res.json({ data: v });
+    return res.json({ data: formatVehicleDates(v) });
   } catch (err) {
     const dup = parseDup(err);
     if (dup) return res.status(dup.status).json(dup.body);
     return res
       .status(400)
-      .json({ error: 'UPDATE_VEHICLE_FAILED', detail: err.message });
+      .json({ error: "UPDATE_VEHICLE_FAILED", detail: err.message });
   }
 };
 
@@ -172,7 +174,7 @@ exports.setDefault = async (req, res) => {
 
     if (!v) {
       await session.abortTransaction();
-      return res.status(404).json({ error: 'VEHICLE_NOT_FOUND' });
+      return res.status(404).json({ error: "VEHICLE_NOT_FOUND" });
     }
 
     await Vehicle.updateMany(
@@ -185,12 +187,12 @@ exports.setDefault = async (req, res) => {
     await v.save({ session });
 
     await session.commitTransaction();
-    return res.json({ data: v });
+    return res.json({ data: formatVehicleDates(v) });
   } catch (err) {
     await session.abortTransaction();
     return res
       .status(400)
-      .json({ error: 'SET_DEFAULT_FAILED', detail: err.message });
+      .json({ error: "SET_DEFAULT_FAILED", detail: err.message });
   } finally {
     session.endSession();
   }
@@ -217,7 +219,7 @@ exports.remove = async (req, res) => {
 
     if (!v) {
       await session.abortTransaction();
-      return res.status(404).json({ error: 'VEHICLE_NOT_FOUND' });
+      return res.status(404).json({ error: "VEHICLE_NOT_FOUND" });
     }
 
     const wasDefault = v.is_default === true;
@@ -247,7 +249,7 @@ exports.remove = async (req, res) => {
     await session.abortTransaction();
     return res
       .status(400)
-      .json({ error: 'DELETE_VEHICLE_FAILED', detail: err.message });
+      .json({ error: "DELETE_VEHICLE_FAILED", detail: err.message });
   } finally {
     session.endSession();
   }
