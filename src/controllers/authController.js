@@ -5,11 +5,32 @@ const mongoose = require('mongoose');
 const User = require('../models/User');
 const Wallet = require('../models/Wallet');
 
+// 👉 THÊM 2 IMPORT NÀY
+const MembershipPlan = require('../models/MembershipPlan');
+const UserMembership  = require('../models/UserMembership');
+
 const ROUNDS = Number(process.env.BCRYPT_ROUNDS || 10);
 const JWT_SECRET = process.env.JWT_SECRET;
 
 const normalizeEmail = (email) =>
   typeof email === 'string' ? email.trim().toLowerCase() : '';
+
+// 👉 HELPER: đảm bảo user luôn có membership (mặc định FREE nếu chưa có)
+async function ensureUserMembership(userId) {
+  let um = await UserMembership.findOne({ user_id: userId });
+  if (um) return um;
+
+  // Lấy plan FREE đang ACTIVE; nếu không có thì fallback
+  const free = await MembershipPlan.findOne({ code: 'FREE', status: 'ACTIVE' }).lean();
+  um = await UserMembership.create({
+    user_id: userId,
+    plan_code: free?.code || 'FREE',
+    plan_name: free?.name || 'Free',
+    monthly_fee_vnd: free?.monthly_fee_vnd || 0,
+    status: 'ACTIVE'
+  });
+  return um;
+}
 
 exports.signup = async (req, res) => {
   const session = await mongoose.startSession();
@@ -69,6 +90,18 @@ exports.signup = async (req, res) => {
 
     await Wallet.create([{ user_id: user.id }], { session });
 
+    // (tuỳ chọn) Khởi tạo membership FREE luôn khi signup để nhất quán dữ liệu
+    const free = await MembershipPlan.findOne({ code: 'FREE', status: 'ACTIVE' })
+      .session(session)
+      .lean();
+    await UserMembership.create([{
+      user_id: user.id,
+      plan_code: free?.code || 'FREE',
+      plan_name: free?.name || 'Free',
+      monthly_fee_vnd: free?.monthly_fee_vnd || 0,
+      status: 'ACTIVE'
+    }], { session });
+
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, {
       expiresIn: '7d',
     });
@@ -77,6 +110,13 @@ exports.signup = async (req, res) => {
     return res.status(201).json({
       token,
       user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      // (tuỳ chọn) trả luôn membership để UI hiển thị ngay sau đăng ký
+      membership: {
+        plan_code: free?.code || 'FREE',
+        plan_name: free?.name || 'Free',
+        monthly_fee_vnd: free?.monthly_fee_vnd || 0,
+        status: 'ACTIVE'
+      }
     });
   } catch (err) {
     await session.abortTransaction();
@@ -108,9 +148,23 @@ exports.login = async (req, res) => {
       expiresIn: '7d',
     });
 
+    // 👉 đảm bảo có membership & trả về cho UI
+    const um = await ensureUserMembership(user.id);
+    const plan = await MembershipPlan.findOne({ code: um.plan_code, status: 'ACTIVE' })
+      .select('code name monthly_fee_vnd mods')
+      .lean();
+
     return res.json({
       token,
-      user: { id: user.id, role: user.role, name: user.name },
+      user: { id: user.id, role: user.role, name: user.name, email: user.email },
+      membership: {
+        plan_code: um.plan_code,
+        plan_name: um.plan_name,
+        monthly_fee_vnd: um.monthly_fee_vnd,
+        status: um.status,
+        renew_at: um.renew_at,
+        plan_public: plan || null
+      }
     });
   } catch (err) {
     return res.status(500).json({ error: 'SERVER_ERROR', detail: err.message });

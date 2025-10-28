@@ -1,23 +1,32 @@
 require('dotenv').config();
+
+// Fallback nếu không có TZ trong .env
+process.env.TZ = process.env.TZ || 'Asia/Ho_Chi_Minh';
+
 const express = require('express');
-const http = require("http");
+const http = require('http');
 const connectDB = require('./config/mongodb');
 
-require('dotenv').config();
-const errorHandler = require("./middlewares/errorHandler");
-const { setupSocketServer } = require("./sockets");
+const errorHandler = require('./middlewares/errorHandler');
+const { setupSocketServer } = require('./sockets');
 
 const payment = require('./controllers/paymentController');
 
-
 const app = express();
 const server = http.createServer(app);
+
+// socket.io
 setupSocketServer(server);
+
+// connect DB
 connectDB();
+
 // CORS
-app.use(require("./config/cors"));
+app.use(require('./config/cors'));
+
 // PayOS webhook: PHẢI đặt TRƯỚC express.json()
-app.post('/api/v1/payments/payos/webhook',
+app.post(
+  '/api/v1/payments/payos/webhook',
   express.raw({ type: 'application/json' }),
   payment.payosWebhook
 );
@@ -42,7 +51,16 @@ app.use('/api/v1/feedbacks', require('./routes/v1/feedbackRoutes'));
 app.use('/api/v1/analytics', require('./routes/v1/analytics'));
 
 
+app.use('/api/v1/memberships', require('./routes/v1/memberships'));
+app.use('/api/v1/admin/membership-plans', require('./routes/v1/adminMembershipPlans'));
 
+app.use('/api/v1/analytics', require('./routes/v1/analyticsRoutes'));
+app.use('/api/v1/invoices', require('./routes/v1/invoiceRoutes'));
+
+//  Thêm route admin ví/giao dịch
+app.use('/api/v1/admin/wallet', require('./routes/v1/walletAdminRoutes'));
+
+// 404 fallback
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -53,7 +71,6 @@ app.use((req, res) => {
 
 // Error handler (phải đặt cuối cùng)
 app.use(errorHandler);
-
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

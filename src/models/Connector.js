@@ -1,6 +1,5 @@
 // src/models/Connector.js
 const mongoose = require("mongoose");
-const { v4: uuidv4 } = require("uuid");
 const {
   CONNECTOR_STATUS,
   TARIFF_CONNECTOR_TYPES,
@@ -33,7 +32,6 @@ const ConnectorSchema = new mongoose.Schema(
       default: "IDLE",
     },
     code: { type: String, required: true, trim: true }, // unique trong station
-    qrToken: { type: String, default: uuidv4, unique: true },
   },
   { timestamps: true }
 );
@@ -41,6 +39,5 @@ const ConnectorSchema = new mongoose.Schema(
 ConnectorSchema.index({ chargerId: 1, code: 1 }, { unique: true });
 ConnectorSchema.index({ chargerId: 1, status: 1 });
 ConnectorSchema.index({ stationId: 1, status: 1 });
-ConnectorSchema.index({ qrToken: 1 }, { unique: true });
 
 module.exports = mongoose.model("Connector", ConnectorSchema);

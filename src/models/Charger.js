@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { v4: uuidv4 } = require("uuid");
 const {
   CHARGER_STATUS,
   TARIFF_CONNECTOR_TYPES,
@@ -26,10 +27,12 @@ const ChargerSchema = new mongoose.Schema(
       required: true,
       default: "ONLINE",
     },
+    qrToken: { type: String, default: uuidv4, unique: true },
   },
   { timestamps: true }
 );
 
 ChargerSchema.index({ stationId: 1, code: 1 }, { unique: true });
+ChargerSchema.index({ qrToken: 1 }, { unique: true });
 
 module.exports = mongoose.model("Charger", ChargerSchema);
