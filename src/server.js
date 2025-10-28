@@ -48,6 +48,7 @@ app.use('/api/v1/sessions', require('./routes/v1/sessionsRoutes'));
 app.use('/api/v1/vehicles', require('./routes/v1/vehicleRoutes'));
 app.use("/api/v1/chargers", require("./routes/v1/chargersRoutes"));
 app.use('/api/v1/feedbacks', require('./routes/v1/feedbackRoutes'));
+app.use('/api/v1/analytics', require('./routes/v1/analytics'));
 
 
 app.use('/api/v1/memberships', require('./routes/v1/memberships'));
