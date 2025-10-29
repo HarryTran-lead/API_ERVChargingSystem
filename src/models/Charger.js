@@ -26,8 +26,7 @@ const ChargerSchema = new mongoose.Schema(
       enum: CHARGER_STATUS,
       required: true,
       default: "ONLINE",
-    },
-    qrToken: { type: String, default: uuidv4, unique: true },
+    }
   },
   { timestamps: true }
 );

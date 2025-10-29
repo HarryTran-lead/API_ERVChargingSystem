@@ -8,9 +8,4 @@ router.get("/", protect([ROLES.ADMIN, ROLES.STAFF,ROLES.DRIVER]), C.listChargers
 router.get("/:id", protect([ROLES.ADMIN, ROLES.STAFF,ROLES.DRIVER]), C.getCharger);
 router.put("/:id", protect([ROLES.ADMIN]), C.updateCharger);
 router.delete("/:id", protect([ROLES.ADMIN]), C.deleteCharger);
-router.get(
-  "/scan/:token",
-  protect([ROLES.ADMIN, ROLES.STAFF, ROLES.DRIVER]),
-  C.getChargerScanDetails
-);
 module.exports = router;
