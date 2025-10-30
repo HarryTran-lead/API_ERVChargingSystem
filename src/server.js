@@ -60,6 +60,7 @@ app.use('/api/v1/invoices', require('./routes/v1/invoiceRoutes'));
 //  Thêm route admin ví/giao dịch
 app.use('/api/v1/admin/wallet', require('./routes/v1/walletAdminRoutes'));
 
+app.use('/api/v1/admin', require('./routes/v1/adminRoutes'));
 // 404 fallback
 app.use((req, res) => {
   res.status(404).json({
