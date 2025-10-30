@@ -9,7 +9,21 @@ const NotificationSchema = new mongoose.Schema(
     body: { type: String, trim: true },
     type: {
       type: String,
-      enum: ['info', 'success', 'warning', 'error', 'booking', 'session', 'invoice', 'wallet', 'system'],
+      enum: [
+        'info',
+        'success',
+        'warning',
+        'error',
+        'booking',
+        'session',
+        'invoice',
+        'wallet',
+        'system',
+        // 👇 thêm các loại bạn đang dùng
+        'membership',
+        'membership.purchase',
+        'membership.switch',
+      ],
       default: 'info',
     },
     data: {
