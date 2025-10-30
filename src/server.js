@@ -49,7 +49,7 @@ app.use('/api/v1/vehicles', require('./routes/v1/vehicleRoutes'));
 app.use("/api/v1/chargers", require("./routes/v1/chargersRoutes"));
 app.use('/api/v1/feedbacks', require('./routes/v1/feedbackRoutes'));
 app.use('/api/v1/analytics', require('./routes/v1/analytics'));
-
+app.use('/api/v1/notifications', require('./routes/v1/notificationRoutes'));
 
 app.use('/api/v1/memberships', require('./routes/v1/memberships'));
 app.use('/api/v1/admin/membership-plans', require('./routes/v1/adminMembershipPlans'));

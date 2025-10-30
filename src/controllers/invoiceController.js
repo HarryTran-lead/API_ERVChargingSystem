@@ -1,144 +1,307 @@
-// src/controllers/invoiceController.js
-const mongoose = require("mongoose");
-const Invoice = require("../models/Invoice");
-const Wallet = require("../models/Wallet");
-const WalletTx = require("../models/WalletTransaction");
-const { ensureRequestUserId } = require("../utils/requestUser");
-const { formatInvoiceDates } = require("../utils/timezoneHelpers");
+const mongoose = require('mongoose');
+const Invoice = require('../models/Invoice');
+const asyncHandler = require('../utils/asyncHandler');
+const { HttpError } = require('../utils/errors');
+const { formatInvoiceDates, formatToVietnamTime } = require('../utils/timezoneHelpers');
+const { safeNotifyUser } = require('../services/notificationService');
 
-exports.getInvoice = async (req, res) => {
-  const inv = await Invoice.findOne({ id: req.params.id });
-  if (!inv) return res.status(404).json({ msg: "Invoice not found" });
+const STATUS_SET = new Set(['ISSUED', 'VOID']);
+const PAYMENT_STATUS_SET = new Set(['UNPAID', 'PAID', 'EXPIRED']);
 
-  // Nếu là driver thì chỉ xem hóa đơn của mình
-  if (req.user?.role === "driver" && inv.user_id !== req.user.id) {
-    return res.status(403).json({ msg: "Forbidden" });
-  }
-  res.json(formatInvoiceDates(inv));
+const toPlain = (doc) =>
+  doc && typeof doc.toObject === 'function' ? doc.toObject() : doc;
+
+const parseDate = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 };
 
-// GET /api/v1/invoices/me?status=UNPAID|PAID|EXPIRED
-exports.listMyInvoices = async (req, res) => {
-  const userId = ensureRequestUserId(req);
-  const status = req.query.status;
-  const q = { user_id: userId };
-  if (status) q.payment_status = status;
-  const invoices = await Invoice.find(q).sort({ createdAt: -1 }).lean();
-  const formattedInvoices = invoices.map((invoice) =>
-    formatInvoiceDates(invoice)
-  );
-  res.json({ items: formattedInvoices });
+const buildInvoiceQuery = (params = {}) => {
+  const query = {};
+  if (params.userId) {
+    query.user_id = params.userId;
+  }
+  if (params.sessionId) {
+    query.session_id = params.sessionId;
+  }
+  if (params.status) {
+    const statuses = String(params.status)
+      .split(',')
+      .map((token) => token.trim().toUpperCase())
+      .filter((token) => STATUS_SET.has(token));
+    if (statuses.length > 0) {
+      query.status = { $in: statuses };
+    }
+  }
+  if (params.paymentStatus) {
+    const paymentStatuses = String(params.paymentStatus)
+      .split(',')
+      .map((token) => token.trim().toUpperCase())
+      .filter((token) => PAYMENT_STATUS_SET.has(token));
+    if (paymentStatuses.length > 0) {
+      query.payment_status = { $in: paymentStatuses };
+    }
+  }
+  const fromDate = parseDate(params.from);
+  const toDate = parseDate(params.to);
+  if (fromDate || toDate) {
+    query.createdAt = {};
+    if (fromDate) {
+      query.createdAt.$gte = fromDate;
+    }
+    if (toDate) {
+      query.createdAt.$lte = toDate;
+    }
+  }
+  if (params.currency) {
+    query.currency = params.currency;
+  }
+  return query;
 };
 
-// POST /api/v1/invoices/:id/pay
-exports.payInvoice = async (req, res) => {
-  const userId = ensureRequestUserId(req);
-  const inv = await Invoice.findOne({ id: req.params.id });
-  if (!inv) return res.status(404).json({ msg: "Invoice not found" });
-  if (inv.user_id !== userId && req.user?.role !== "admin") {
-    return res.status(403).json({ msg: "Forbidden" });
-  }
-  if (inv.status !== "ISSUED") {
-    return res.status(400).json({ msg: "Invoice is not payable (status)" });
-  }
-  if (inv.payment_status === "PAID") {
-    return res.json({
-      ok: true,
-      alreadyPaid: true,
-      invoice: formatInvoiceDates(inv),
-    });
-  }
-  if (inv.due_at && new Date(inv.due_at).getTime() < Date.now()) {
-    await Invoice.updateOne(
-      { _id: inv._id },
-      { $set: { payment_status: "EXPIRED" } }
-    );
-    return res.status(400).json({ msg: "Invoice is expired" });
+const formatInvoice = (doc) => {
+  if (!doc) return null;
+  return formatInvoiceDates(toPlain(doc));
+};
+
+const formatDateForNotification = (value) =>
+  value ? formatToVietnamTime(value) : null;
+
+const notifyInvoiceChange = async (before, after) => {
+  const previous = toPlain(before);
+  const current = toPlain(after);
+
+  if (!current?.user_id) {
+    return;
   }
 
-  // Idempotent debit by invoice
-  const amount = Number(inv.total || 0);
-  if (!Number.isInteger(amount) || amount <= 0) {
-    return res.status(400).json({ msg: "Invalid invoice total" });
+  const paymentChanged = previous?.payment_status !== current.payment_status;
+  const statusChanged = previous?.status !== current.status;
+
+  let title = 'Invoice updated';
+  let body = `Invoice ${current.id} has been updated by an administrator.`;
+
+  if (paymentChanged) {
+    if (current.payment_status === 'PAID') {
+      title = 'Invoice paid';
+      body = `Invoice ${current.id} has been marked as paid on ${
+        formatDateForNotification(current.paid_at) || 'the latest update'
+      }.`;
+    } else if (current.payment_status === 'EXPIRED') {
+      title = 'Invoice expired';
+      body = `Invoice ${current.id} is now marked as expired.`;
+    } else if (current.payment_status === 'UNPAID') {
+      title = 'Invoice payment pending';
+      body = `Invoice ${current.id} has been set back to unpaid status.`;
+    }
+  } else if (statusChanged) {
+    if (current.status === 'VOID') {
+      title = 'Invoice voided';
+      body = `Invoice ${current.id} has been voided by an administrator.`;
+    } else if (current.status === 'ISSUED') {
+      title = 'Invoice reissued';
+      body = `Invoice ${current.id} has been reissued.`;
+    }
   }
 
-  const session = await mongoose.startSession();
-  try {
-    await session.withTransaction(async () => {
-      const wallet = await Wallet.findOne({ user_id: inv.user_id }).session(
-        session
-      );
-      if (!wallet) throw new Error("Wallet not found");
+  await safeNotifyUser({
+    userId: current.user_id,
+    title,
+    body,
+    type: 'invoice',
+    data: {
+      invoiceId: current.id,
+      status: current.status,
+      paymentStatus: current.payment_status,
+      total: current.total,
+      paidTotal: current.paid_total,
+      currency: current.currency,
+      dueAt: formatDateForNotification(current.due_at),
+      paidAt: formatDateForNotification(current.paid_at),
+      sessionId: current.session_id,
+    },
+  });
+};
 
-      const idemKey = `invoice:${inv.id}`;
-      const existed = await WalletTx.findOne({
-        user_id: inv.user_id,
-        idempotency_key: idemKey,
-      }).session(session);
-      if (existed) {
-        // Đã trừ trước đó: đánh dấu PAID nếu chưa cập nhật
-        if (inv.payment_status !== "PAID") {
-          await Invoice.updateOne(
-            { _id: inv._id },
-            {
-              $set: {
-                payment_status: "PAID",
-                paid_total: amount,
-                paid_at: new Date(),
-              },
-            }
-          ).session(session);
-        }
-        return;
+const findInvoiceByParam = async (param, session = null) => {
+  const or = [{ id: param }, { session_id: param }];
+  if (mongoose.Types.ObjectId.isValid(param)) {
+    or.push({ _id: new mongoose.Types.ObjectId(param) });
+  }
+  const query = Invoice.findOne({ $or: or });
+  if (session) {
+    query.session(session);
+  }
+  return query;
+};
+
+exports.listInvoices = asyncHandler(async (req, res) => {
+  const { page = 1, limit = 20, sort = '-createdAt', search } = req.query;
+  const query = buildInvoiceQuery(req.query);
+
+  if (search) {
+    const keyword = String(search).trim();
+    if (keyword) {
+      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      query.$or = [
+        { id: keyword },
+        { session_id: keyword },
+        { user_id: keyword },
+        { currency: keyword },
+        { id: { $regex: regex } },
+      ];
+    }
+  }
+
+  const pageNumber = Math.max(1, Number(page) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(limit) || 20));
+  const skip = (pageNumber - 1) * pageSize;
+
+  const sortSpec = {};
+  const sortFields = String(sort)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (sortFields.length === 0) {
+    sortSpec.createdAt = -1;
+  } else {
+    sortFields.forEach((field) => {
+      let direction = 1;
+      let name = field;
+      if (field.startsWith('-')) {
+        direction = -1;
+        name = field.slice(1);
+      } else if (field.startsWith('+')) {
+        name = field.slice(1);
       }
-
-      if ((wallet.balance || 0) < amount) {
-        throw new Error("Insufficient wallet balance");
+      if (['createdAt', 'updatedAt', 'issued_at', 'due_at', 'total'].includes(name)) {
+        sortSpec[name] = direction;
       }
-
-      const [tx] = await WalletTx.create(
-        [
-          {
-            wallet_id: wallet.id,
-            user_id: inv.user_id,
-            type: "DEBIT",
-            amount,
-            method: "wallet",
-            idempotency_key: idemKey,
-            status: "PENDING",
-            meta: { invoice_id: inv.id },
-          },
-        ],
-        { session }
-      );
-
-      const updated = await Wallet.findOneAndUpdate(
-        { user_id: inv.user_id },
-        { $inc: { balance: -amount } },
-        { new: true, session }
-      );
-
-      await WalletTx.updateOne(
-        { id: tx.id },
-        { $set: { status: "SUCCEEDED", resulting_balance: updated.balance } },
-        { session }
-      );
-
-      await Invoice.updateOne(
-        { _id: inv._id },
-        {
-          $set: {
-            payment_status: "PAID",
-            paid_total: amount,
-            paid_at: new Date(),
-          },
-        }
-      ).session(session);
     });
-  } finally {
-    session.endSession();
+    if (Object.keys(sortSpec).length === 0) {
+      sortSpec.createdAt = -1;
+    }
   }
 
-  const fresh = await Invoice.findOne({ id: inv.id });
-  return res.json({ ok: true, invoice: formatInvoiceDates(fresh) });
-};
+  const [items, total] = await Promise.all([
+    Invoice.find(query)
+      .sort(sortSpec)
+      .skip(skip)
+      .limit(pageSize)
+      .lean(),
+    Invoice.countDocuments(query),
+  ]);
+
+  res.json({
+    pagination: {
+      page: pageNumber,
+      limit: pageSize,
+      total,
+      pages: pageSize > 0 ? Math.ceil(total / pageSize) : 0,
+    },
+    items: items.map((invoice) => formatInvoice(invoice)),
+  });
+});
+
+exports.getInvoice = asyncHandler(async (req, res) => {
+  const invoice = await findInvoiceByParam(req.params.id);
+  if (!invoice) {
+    throw new HttpError(404, 'Invoice not found');
+  }
+  res.json({ invoice: formatInvoice(invoice) });
+});
+
+exports.updateInvoice = asyncHandler(async (req, res) => {
+  const invoice = await findInvoiceByParam(req.params.id);
+  if (!invoice) {
+    throw new HttpError(404, 'Invoice not found');
+  }
+
+  const previousSnapshot = toPlain(invoice);
+  const updates = {};
+  const {
+    status,
+    paymentStatus,
+    dueAt,
+    paidAt,
+    paidTotal,
+    currency,
+    meta,
+  } = req.body;
+
+  if (status != null) {
+    const normalized = String(status).toUpperCase();
+    if (!STATUS_SET.has(normalized)) {
+      throw new HttpError(400, 'Unsupported invoice status');
+    }
+    updates.status = normalized;
+  }
+
+  if (paymentStatus != null) {
+    const normalized = String(paymentStatus).toUpperCase();
+    if (!PAYMENT_STATUS_SET.has(normalized)) {
+      throw new HttpError(400, 'Unsupported payment status');
+    }
+    updates.payment_status = normalized;
+    if (normalized === 'PAID') {
+      updates.paid_at = paidAt ? parseDate(paidAt) || new Date() : new Date();
+      if (paidTotal != null) {
+        const amount = Number(paidTotal);
+        if (!Number.isInteger(amount) || amount < 0) {
+          throw new HttpError(400, 'paidTotal must be a non-negative integer');
+        }
+        updates.paid_total = amount;
+      } else if (invoice.paid_total <= 0) {
+        updates.paid_total = invoice.total;
+      }
+    } else {
+      updates.paid_at = null;
+      if (normalized === 'UNPAID') {
+        updates.paid_total = paidTotal != null ? Number(paidTotal) : 0;
+      }
+    }
+  }
+
+  if (dueAt != null) {
+    const parsed = parseDate(dueAt);
+    if (!parsed) {
+      throw new HttpError(400, 'Invalid dueAt value');
+    }
+    updates.due_at = parsed;
+  }
+
+  if (paidAt != null && !updates.paid_at) {
+    const parsed = parseDate(paidAt);
+    if (!parsed) {
+      throw new HttpError(400, 'Invalid paidAt value');
+    }
+    updates.paid_at = parsed;
+  }
+
+  if (paidTotal != null && updates.paid_total == null) {
+    const amount = Number(paidTotal);
+    if (!Number.isInteger(amount) || amount < 0) {
+      throw new HttpError(400, 'paidTotal must be a non-negative integer');
+    }
+    updates.paid_total = amount;
+  }
+
+  if (currency != null) {
+    updates.currency = currency;
+  }
+
+  if (meta && typeof meta === 'object') {
+    updates.meta = { ...invoice.meta, ...meta };
+  }
+
+  if (Object.keys(updates).length === 0) {
+    throw new HttpError(400, 'No updates were provided');
+  }
+
+  await Invoice.updateOne({ _id: invoice._id }, { $set: updates });
+  const refreshed = await Invoice.findById(invoice._id);
+  await notifyInvoiceChange(previousSnapshot, refreshed);
+  res.json({ invoice: formatInvoice(refreshed) });
+});

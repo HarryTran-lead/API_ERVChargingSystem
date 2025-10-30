@@ -1,8 +1,9 @@
-const Feedback = require("../models/Feedback");
-const Booking = require("../models/Booking");
-const asyncHandler = require("../utils/asyncHandler");
-const { HttpError } = require("../utils/errors");
-const { ensureRequestUserId } = require("../utils/requestUser");
+const Feedback = require('../models/Feedback');
+const Booking = require('../models/Booking');
+const asyncHandler = require('../utils/asyncHandler');
+const { HttpError } = require('../utils/errors');
+const { ensureRequestUserId } = require('../utils/requestUser');
+const { safeNotifyUser } = require('../services/notificationService');
 
 const normalizeRating = (value) => {
   const parsed = Number(value);
@@ -16,22 +17,22 @@ exports.createFeedback = asyncHandler(async (req, res) => {
 
   const parsedRating = normalizeRating(rating);
   if (parsedRating === null) {
-    throw new HttpError(400, "rating must be a numeric value");
+    throw new HttpError(400, 'rating must be a numeric value');
   }
   if (parsedRating < 1 || parsedRating > 5) {
-    throw new HttpError(400, "rating must be between 1 and 5");
+    throw new HttpError(400, 'rating must be between 1 and 5');
   }
 
   let bookingRef;
   if (bookingId) {
-    const booking = await Booking.findOne({ id: bookingId, userId }).select("id");
+    const booking = await Booking.findOne({ id: bookingId, userId }).select('id');
     if (!booking) {
-      throw new HttpError(404, "Booking not found for this user");
+      throw new HttpError(404, 'Booking not found for this user');
     }
     bookingRef = booking.id;
     const existing = await Feedback.findOne({ userId, bookingId: bookingRef }).lean();
     if (existing) {
-      throw new HttpError(409, "Feedback already submitted for this booking");
+      throw new HttpError(409, 'Feedback already submitted for this booking');
     }
   }
 
@@ -40,7 +41,7 @@ exports.createFeedback = asyncHandler(async (req, res) => {
     rating: parsedRating,
   };
 
-  const trimmedComment = typeof comment === "string" ? comment.trim() : "";
+  const trimmedComment = typeof comment === 'string' ? comment.trim() : '';
   if (trimmedComment) {
     payload.comment = trimmedComment;
   }
@@ -51,8 +52,22 @@ exports.createFeedback = asyncHandler(async (req, res) => {
   const feedback = await Feedback.create(payload);
   const response = feedback.toObject();
 
+  await safeNotifyUser({
+    userId,
+    title: 'Thank you for your feedback',
+    body: `We have received your ${parsedRating}-star feedback${
+      bookingRef ? ` for booking ${bookingRef}` : ''
+    }.`,
+    type: 'system',
+    data: {
+      feedbackId: feedback.id,
+      bookingId: bookingRef || null,
+      rating: parsedRating,
+    },
+  });
+
   res.status(201).json({
-    msg: "Feedback submitted",
+    msg: 'Feedback submitted',
     feedback: response,
   });
 });
@@ -73,4 +88,4 @@ exports.getAllFeedbacks = asyncHandler(async (req, res) => {
     .lean();
 
   res.json({ feedbacks });
-  });
+});
