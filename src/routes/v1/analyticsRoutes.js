@@ -1,13 +1,21 @@
-const express = require("express");
+// src/routes/v1/analyticsRoutes.js
+const express = require('express');
 const router = express.Router();
-const controller = require("../../controllers/analyticsController");
-const { protect } = require("../../middlewares/authMiddleware");
-const { ROLES } = require("../../constants/enums");
 
-// Driver-only analytics for self
-router.use(protect([ROLES.DRIVER, ROLES.ADMIN]));
+const controller = require('../../controllers/analyticsController');
+const { protect } = require('../../middlewares/authMiddleware');
+const { ROLES } = require('../../constants/enums');
 
-router.get("/me/monthly-costs", controller.getMyMonthlyCosts);
-router.get("/me/habits", controller.getMyChargingHabits);
+// Admin-only analytics
+router.get(
+  '/admin/overview',
+  protect([ROLES.ADMIN]),
+  controller.getAdminOverview
+);
+
+// Driver/Admin self analytics (scope middleware only to /me/*)
+router.use('/me', protect([ROLES.DRIVER, ROLES.ADMIN]));
+router.get('/me/monthly-costs', controller.getMyMonthlyCosts);
+router.get('/me/habits', controller.getMyChargingHabits);
 
 module.exports = router;
