@@ -6,7 +6,9 @@ const corsOptions = {
     "http://localhost:5173", // Thay đổi theo domain front-end
     // Thêm các domain khác nếu cần
   ],
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  // Allow common HTTP methods including PATCH for partial updates
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
 };
 

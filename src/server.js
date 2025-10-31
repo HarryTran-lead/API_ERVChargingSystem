@@ -57,6 +57,9 @@ app.use('/api/v1/admin/membership-plans', require('./routes/v1/adminMembershipPl
 app.use('/api/v1/analytics', require('./routes/v1/analyticsRoutes'));
 app.use('/api/v1/invoices', require('./routes/v1/invoiceRoutes'));
 
+// Profile (current authenticated user)
+app.use('/api/v1/profile', require('./routes/v1/profileRoutes'));
+
 //  Thêm route admin ví/giao dịch
 app.use('/api/v1/admin/wallet', require('./routes/v1/walletAdminRoutes'));
 
