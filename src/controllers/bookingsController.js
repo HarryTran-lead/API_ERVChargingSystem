@@ -1,4 +1,6 @@
+// src/controllers/bookingController.js
 const mongoose = require("mongoose");
+
 const Booking = require("../models/Booking");
 const Connector = require("../models/Connector");
 const Vehicle = require("../models/Vehicle");
@@ -26,16 +28,16 @@ const {
 const { completeSessionByReference } = require("../services/sessionFinalizer");
 const { safeNotifyUser } = require("../services/notificationService");
 
-// Utility functions
+// ========== Utils ==========
 const toMinutes = (ms) => ms / (60 * 1000);
 
 const vehicleSnapshotFromDoc = (v) => {
   if (!v) return undefined;
   return {
-    id: v.id,
+    id: v.id, // UUID công khai (string theo model Vehicle)
     make: v.make,
     model: v.model,
-    plugType: v.plug_type,
+    plugType: v.plug_type, // map snake_case -> camelCase
     batteryKwh: v.battery_kwh,
     licensePlate: v.license_plate,
   };
@@ -222,14 +224,16 @@ const populateBookingDetails = async (booking) => {
   return result ? shapeBooking(result) : null;
 };
 
-// === CONTROLLER METHODS ===
+// ========== Controllers ==========
 
+// POST /api/v1/bookings
 exports.createBooking = asyncHandler(async (req, res) => {
   const { connectorId, slotStart, vehicleId } = req.body;
   if (!connectorId || !slotStart) {
     throw new HttpError(400, "connectorId and slotStart are required");
   }
 
+  // Không cho client tự đính kèm snapshot xe — server sẽ tự lấy từ xe mặc định
   if (req.body.vehicle) {
     throw new HttpError(
       400,
@@ -238,6 +242,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
   }
 
   const userId = ensureRequestUserId(req);
+
   const start = new Date(slotStart);
   if (Number.isNaN(start.getTime())) {
     throw new HttpError(400, "Invalid slotStart value");
@@ -254,6 +259,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
     throw new HttpError(400, "Slot must be in the future");
   }
 
+  // Bắt buộc phải có xe mặc định
   const defaultVehicle = await Vehicle.findOne({
     user_id: userId,
     is_default: true,
@@ -267,6 +273,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
     );
   }
 
+  // Nếu gửi vehicleId thì bắt buộc phải là xe mặc định
   if (vehicleId && vehicleId !== defaultVehicle.id) {
     throw new HttpError(
       400,
@@ -274,12 +281,14 @@ exports.createBooking = asyncHandler(async (req, res) => {
     );
   }
 
+  // Kiểm tra user có booking đang active không (trừ slot liên tiếp)
   const userActiveBookings = await Booking.find({
     userId,
     status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
   }).lean();
 
   if (userActiveBookings.length > 0) {
+    // Cho phép slot liên tiếp (cách nhau tối đa 5 phút)
     const isConsecutiveSlot = userActiveBookings.some((b) => {
       const diff = Math.abs(
         normalizedStart.getTime() - new Date(b.slotEnd).getTime()
@@ -294,6 +303,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
       );
     }
 
+    // Không quá 2 slot liên tiếp
     if (userActiveBookings.length >= 2) {
       throw new HttpError(
         409,
@@ -302,6 +312,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
     }
   }
 
+  // Giới hạn 3 slot/ngày
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const tomorrow = new Date(today);
@@ -327,6 +338,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
     normalizedStart.getTime() + BOOKING_GRACE_MINUTES * 60 * 1000
   );
 
+  // Chống đặt chồng lấp trên cùng connector
   const overlapping = await Booking.findOne({
     connectorId,
     status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
@@ -351,9 +363,10 @@ exports.createBooking = asyncHandler(async (req, res) => {
   }
 
   const vehicleSnapshot = vehicleSnapshotFromDoc(defaultVehicle);
-  let connectorDoc;
 
+  let connectorDoc;
   try {
+    // Reserve connector nếu đang IDLE
     connectorDoc = await Connector.findOneAndUpdate(
       { _id: connectorId, status: "IDLE" },
       { $set: { status: "RESERVED" } },
@@ -384,6 +397,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
       booking: formatBookingDates(booking),
     });
   } catch (err) {
+    // rollback trạng thái connector nếu lỗi
     if (connectorDoc) {
       await Connector.findByIdAndUpdate(connectorDoc._id, {
         $set: { status: "IDLE" },
@@ -393,16 +407,19 @@ exports.createBooking = asyncHandler(async (req, res) => {
   }
 });
 
+// GET /api/v1/bookings/my
 exports.getMyBookings = asyncHandler(async (req, res) => {
   const userId = ensureRequestUserId(req);
   const bookings = await Booking.find({ userId })
     .sort({ slotStart: -1 })
     .lean();
+
   res.json({
     bookings: bookings.map(formatBookingDates),
   });
 });
 
+// POST /api/v1/bookings/:id/cancel
 exports.cancelBooking = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const userId = ensureRequestUserId(req);
@@ -434,6 +451,7 @@ exports.cancelBooking = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/v1/bookings/available-slots
 exports.getAvailableSlots = asyncHandler(async (req, res) => {
   const {
     stationId,
@@ -441,17 +459,22 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
     connectorType,
     duration = BOOKING_SLOT_MINUTES,
   } = req.query;
+
   if (!stationId) throw new HttpError(400, "stationId is required");
 
+  // Parse date (default to today)
   const targetDate = date ? new Date(date) : new Date();
-  if (Number.isNaN(targetDate.getTime()))
+  if (Number.isNaN(targetDate.getTime())) {
     throw new HttpError(400, "Invalid date format");
+  }
 
+  // Time range trong ngày
   const startOfDay = new Date(targetDate);
   startOfDay.setHours(0, 0, 0, 0);
   const endOfDay = new Date(targetDate);
   endOfDay.setHours(23, 59, 59, 999);
 
+  // Lọc connector theo station + trạng thái IDLE (+ loại nếu có)
   const connectorFilter = { stationId, status: "IDLE" };
   if (connectorType) connectorFilter.type = connectorType;
 
@@ -467,24 +490,29 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
     });
   }
 
+  // Bookings active trong ngày
   const existingBookings = await Booking.find({
     stationId,
     status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
     slotStart: { $gte: startOfDay, $lte: endOfDay },
   }).lean();
 
+  // Sinh slots mỗi 30'
   const slots = [];
-  const slotStartHour = 6,
-    slotEndHour = 22;
+  const slotStartHour = 6; // 6 AM
+  const slotEndHour = 22; // 10 PM
 
-  for (let h = slotStartHour; h < slotEndHour; h++) {
-    for (let m = 0; m < 60; m += 30) {
+  for (let hour = slotStartHour; hour < slotEndHour; hour++) {
+    for (let minute = 0; minute < 60; minute += 30) {
       const slotStart = new Date(targetDate);
-      slotStart.setHours(h, m, 0, 0);
+      slotStart.setHours(hour, minute, 0, 0);
+
       if (slotStart < new Date()) continue;
 
       const slotEnd = new Date(slotStart);
-      slotEnd.setMinutes(slotEnd.getMinutes() + duration);
+      slotEnd.setMinutes(
+        slotEnd.getMinutes() + Number(duration || BOOKING_SLOT_MINUTES)
+      );
 
       const availableConnectors = [];
 
@@ -503,6 +531,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
             connector.type,
             slotStart
           );
+
           availableConnectors.push({
             connectorId: connector._id,
             connectorCode: connector.code,
@@ -525,7 +554,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
         slots.push({
           slotStart: slotStart.toISOString(),
           slotEnd: slotEnd.toISOString(),
-          duration,
+          duration: Number(duration || BOOKING_SLOT_MINUTES),
           availableConnectors,
           station: {
             id: connectors[0].stationId._id,
@@ -547,6 +576,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/v1/bookings (admin/operator listing + search)
 exports.listBookings = asyncHandler(async (req, res) => {
   const {
     status,
@@ -675,6 +705,7 @@ exports.listBookings = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/v1/bookings/:id
 exports.getBooking = asyncHandler(async (req, res) => {
   const booking = await findBookingByParam(req.params.id);
   if (!booking) throw new HttpError(404, "Booking not found");
@@ -683,6 +714,7 @@ exports.getBooking = asyncHandler(async (req, res) => {
   res.json({ booking: detailed });
 });
 
+// PATCH /api/v1/bookings/:id/status
 exports.updateBookingStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
   if (!status) throw new HttpError(400, "status is required");
@@ -703,6 +735,7 @@ exports.updateBookingStatus = asyncHandler(async (req, res) => {
     });
   }
 
+  // Chỉ cho phép CANCELLED, NO_SHOW, COMPLETED ở endpoint này
   if (
     [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.NO_SHOW].includes(
       normalizedStatus
@@ -716,6 +749,7 @@ exports.updateBookingStatus = asyncHandler(async (req, res) => {
       );
     }
 
+    // Không được hủy/noshow khi còn session active
     const activeSession = await Session.findOne({
       bookingId: booking._id,
       status: { $in: [SESSION_STATUS.PENDING, SESSION_STATUS.CHARGING] },
