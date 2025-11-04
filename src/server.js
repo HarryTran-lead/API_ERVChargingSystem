@@ -61,6 +61,7 @@ app.use('/api/v1/invoices', require('./routes/v1/invoiceRoutes'));
 app.use('/api/v1/admin/wallet', require('./routes/v1/walletAdminRoutes'));
 
 app.use('/api/v1/admin', require('./routes/v1/adminRoutes'));
+app.use('/api/v1/staff', require('./routes/v1/staffRoutes'));
 // 404 fallback
 app.use((req, res) => {
   res.status(404).json({

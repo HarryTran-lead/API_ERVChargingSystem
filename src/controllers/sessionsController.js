@@ -8,8 +8,8 @@ const Tariff = require("../models/Tariff");
 
 const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
-const { ensureRequestUserId } = require("../utils/requestUser");
-const { BOOKING_STATUS, SESSION_STATUS } = require("../constants/enums");
+const { ensureRequestUser, ensureRequestUserId } = require("../utils/requestUser");
+const { BOOKING_STATUS, SESSION_STATUS, ROLES, PAYMENT_METHODS } = require("../constants/enums");
 const {
   BOOKING_SLOT_MINUTES,
   SESSION_MIN_BALANCE_BASE_VND,
@@ -35,7 +35,7 @@ const {
   calculateTimeToFullCharge,
 } = require("../utils/algorithms");
 
-// === UTILS ===
+/* ======================= UTILS ======================= */
 const randomIntInclusive = (min, max) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -59,6 +59,8 @@ const parseDate = (value) => {
 };
 
 const STATUS_SET = new Set(Object.values(SESSION_STATUS));
+const PAYMENT_METHOD_SET = new Set(Object.values(PAYMENT_METHODS));
+const ONSITE_CAPABLE_ROLES = new Set([ROLES.STAFF, ROLES.ADMIN]);
 
 const parseStatuses = (raw) => {
   if (!raw) return [];
@@ -79,8 +81,8 @@ const parseSort = (raw) => {
     .map((f) => f.trim())
     .filter(Boolean)
     .forEach((f) => {
-      let name = f,
-        dir = 1;
+      let name = f;
+      let dir = 1;
       if (f.startsWith("-")) {
         dir = -1;
         name = f.slice(1);
@@ -94,6 +96,18 @@ const parseSort = (raw) => {
 const toPlain = (value) =>
   value && typeof value.toObject === "function" ? value.toObject() : value;
 
+const normalizePaymentMethod = (rawMethod, actorRole) => {
+  if (!rawMethod) return PAYMENT_METHODS.WALLET;
+  const normalized = String(rawMethod).trim().toUpperCase();
+  if (!PAYMENT_METHOD_SET.has(normalized)) {
+    throw new HttpError(400, "Unsupported payment method");
+  }
+  if (normalized === PAYMENT_METHODS.ONSITE && !ONSITE_CAPABLE_ROLES.has(actorRole)) {
+    throw new HttpError(403, "Onsite payments can only be initiated by staff or admin");
+  }
+  return normalized;
+};
+
 const baseSessionPayload = (sessionDoc) => {
   const session = formatSessionDates(toPlain(sessionDoc));
   return {
@@ -104,6 +118,9 @@ const baseSessionPayload = (sessionDoc) => {
     connectorId: session.connectorId?.toString(),
     stationId: session.stationId?.toString(),
     userId: session.userId,
+    operatorId: session.operatorId || null,
+    stoppedBy: session.stoppedBy || null,
+    paymentMethod: session.paymentMethod || PAYMENT_METHODS.WALLET,
     status: session.status,
     socStart: session.socStart,
     socEnd: session.socEnd,
@@ -179,36 +196,69 @@ const shapeSession = (doc) => {
   };
 };
 
-const notifySessionStoppedByAdmin = async (session) => {
+/** Notify when an operator/staff/admin stops a session (role-aware copy) */
+const notifySessionStoppedByOperator = async (session, actor = null) => {
   if (!session?.userId) return;
+
+  const role = actor?.role || ROLES.ADMIN;
+  const roleLabel = (() => {
+    if (role === ROLES.STAFF) return "a station staff member";
+    if (role === ROLES.ADMIN) return "an administrator";
+    return "an operator";
+  })();
+
+  const stoppedAtHuman =
+    formatToVietnamTime(session.stoppedAt) || formatToVietnamTime(new Date());
+
+  const title =
+    role === ROLES.STAFF
+      ? "Charging session stopped by station staff"
+      : "Charging session stopped by administrator";
+
+  const body =
+    "Your charging session " +
+    session.id +
+    " was stopped by " +
+    roleLabel +
+    " at " +
+    stoppedAtHuman +
+    ".";
+
   await safeNotifyUser({
     userId: session.userId,
-    title: "Charging session stopped by admin",
-    body: `Your charging session ${session.id} was stopped by an administrator at ${
-      formatToVietnamTime(session.stoppedAt) || formatToVietnamTime(new Date())
-    }.`,
+    title,
+    body,
     type: "session",
     data: {
       sessionId: session.id,
       bookingId: session.bookingRef || session.bookingId?.toString() || null,
       status: session.status,
-      stoppedAt: formatToVietnamTime(session.stoppedAt),
+      stoppedAt: stoppedAtHuman,
+      operatorRole: role,
+      operatorId: actor?.id || actor?._id || null,
     },
   });
 };
 
-const buildBookingQuery = (userId, reference) => {
-  const query = { userId, $or: [{ id: reference }] };
+/** Build queries that can optionally ignore user constraint for staff/admin flows */
+const buildBookingQuery = (userId, reference, { ignoreUser = false } = {}) => {
+  const query = { $or: [{ id: reference }] };
   if (mongoose.Types.ObjectId.isValid(reference)) {
     query.$or.push({ _id: reference });
+  }
+  if (!ignoreUser && userId) {
+    query.userId = userId;
   }
   return query;
 };
 
-const buildSessionQuery = (userId, reference) => {
-  const query = { userId, $or: [{ id: reference }] };
+const buildSessionQuery = (userId, reference, { ignoreUser = false } = {}) => {
+  const query = { $or: [{ id: reference }] };
   if (mongoose.Types.ObjectId.isValid(reference)) {
     query.$or.push({ _id: reference });
+  }
+  if (!ignoreUser && userId) {
+    query.userId = userId;
   }
   return query;
 };
@@ -241,17 +291,39 @@ const computeChargeDurationMinutes = (
   return maxMinutes;
 };
 
-// === CONTROLLER METHODS ===
+/* ======================= CONTROLLERS ======================= */
 
+/**
+ * POST /sessions/startImmediateCharge
+ * Body: { bookingId, paymentMethod? }
+ * - Driver: chỉ được start booking của chính mình.
+ * - Staff/Admin: có thể start booking của người khác (bỏ ràng buộc user).
+ * - Ví: chỉ kiểm tra số dư khi paymentMethod = WALLET.
+ * - Onsite: chỉ STAFF/ADMIN được phép.
+ */
 exports.startImmediateCharge = asyncHandler(async (req, res) => {
-  const { bookingId } = req.body;
+  const { bookingId, paymentMethod: rawPaymentMethod } = req.body;
   if (!bookingId) throw new HttpError(400, "bookingId is required");
 
-  const userId = ensureRequestUserId(req);
-  const booking = await Booking.findOne(buildBookingQuery(userId, bookingId));
+  const operator = ensureRequestUser(req);
+  const operatorRole = operator?.role || ROLES.DRIVER;
+  const operatorId = ensureRequestUserId(req);
+
+  const bookingQueryOptions =
+    operatorRole === ROLES.DRIVER ? {} : { ignoreUser: true };
+  const bookingUserConstraint = operatorRole === ROLES.DRIVER ? operatorId : null;
+
+  const booking = await Booking.findOne(
+    buildBookingQuery(bookingUserConstraint, bookingId, bookingQueryOptions)
+  );
   if (!booking) throw new HttpError(404, "Booking not found");
   if (booking.status !== BOOKING_STATUS.RESERVED) {
     throw new HttpError(409, "Booking is not ready for check-in");
+  }
+
+  // Driver không được start booking của người khác
+  if (operatorRole === ROLES.DRIVER && booking.userId !== operatorId) {
+    throw new HttpError(403, "You are not allowed to start this booking");
   }
 
   const now = new Date();
@@ -263,12 +335,18 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     throw new HttpError(409, "Session already exists for this booking");
   }
 
-  const wallet = await Wallet.findOne({ user_id: userId });
-  if (!wallet || wallet.balance < SESSION_MIN_BALANCE_BASE_VND) {
-    throw new HttpError(
-      402,
-      `Minimum balance of ${SESSION_MIN_BALANCE_BASE_VND.toLocaleString()} VND is required`
-    );
+  const targetUserId = booking.userId;
+  const paymentMethod = normalizePaymentMethod(rawPaymentMethod, operatorRole);
+
+  // Chỉ kiểm tra ví nếu thanh toán bằng ví
+  if (paymentMethod === PAYMENT_METHODS.WALLET) {
+    const wallet = await Wallet.findOne({ user_id: targetUserId });
+    if (!wallet || wallet.balance < SESSION_MIN_BALANCE_BASE_VND) {
+      throw new HttpError(
+        402,
+        `Minimum balance of ${SESSION_MIN_BALANCE_BASE_VND.toLocaleString()} VND is required`
+      );
+    }
   }
 
   const connector = await Connector.findOneAndUpdate(
@@ -283,33 +361,26 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
   let batteryKwh =
     booking.vehicle?.batteryKwh > 0 ? booking.vehicle.batteryKwh : null;
   if (!batteryKwh && booking.vehicleId) {
-    const vehicle = await Vehicle.findOne({ id: booking.vehicleId, userId })
+    const vehicle = await Vehicle.findOne({ id: booking.vehicleId, userId: targetUserId })
       .select("batteryKwh")
       .lean();
     if (vehicle?.batteryKwh > 0) batteryKwh = vehicle.batteryKwh;
   }
 
   const connectorPowerKw = connector.powerKw > 0 ? connector.powerKw : null;
-  const socStart = randomIntInclusive(
-    SESSION_SOC_RANDOM_MIN,
-    SESSION_SOC_RANDOM_MAX
-  );
+  const socStart = randomIntInclusive(SESSION_SOC_RANDOM_MIN, SESSION_SOC_RANDOM_MAX);
   const chargeDurationMinutes = computeChargeDurationMinutes(
     socStart,
     100,
     batteryKwh,
     connectorPowerKw
   );
+
   const startedAt = now;
   const slotEnd = new Date(booking.slotEnd);
-  const availableMinutes = Math.max(
-    1,
-    Math.ceil((slotEnd - startedAt) / 60000)
-  );
+  const availableMinutes = Math.max(1, Math.ceil((slotEnd - startedAt) / 60000));
   const finalDuration = Math.min(chargeDurationMinutes, availableMinutes);
-  const expectedFullAt = new Date(
-    startedAt.getTime() + finalDuration * 60 * 1000
-  );
+  const expectedFullAt = new Date(startedAt.getTime() + finalDuration * 60 * 1000);
 
   const chargePercentageIn30Min =
     batteryKwh && connectorPowerKw
@@ -319,9 +390,7 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     batteryKwh && connectorPowerKw
       ? calculateTimeToFullCharge(socStart, batteryKwh, connectorPowerKw)
       : null;
-  const energyRemainingKwh = batteryKwh
-    ? ((100 - socStart) / 100) * batteryKwh
-    : 0;
+  const energyRemainingKwh = batteryKwh ? ((100 - socStart) / 100) * batteryKwh : 0;
 
   const tariff = await Tariff.findEffectiveAt(
     booking.stationId,
@@ -345,7 +414,9 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
   const session = await Session.create({
     bookingId: booking._id,
     bookingRef: booking.id,
-    userId,
+    userId: targetUserId,
+    operatorId,
+    paymentMethod,
     stationId: booking.stationId,
     connectorId: booking.connectorId,
     status: SESSION_STATUS.CHARGING,
@@ -357,7 +428,7 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     slotEnd,
     chargeDurationMinutes: finalDuration,
     idleFeeIntervalMinutes: SESSION_IDLE_FEE_INTERVAL_MINUTES,
-    minBalanceRequired: SESSION_MIN_BALANCE_BASE_VND,
+    minBalanceRequired: paymentMethod === PAYMENT_METHODS.WALLET ? SESSION_MIN_BALANCE_BASE_VND : 0,
     pricing: pricingSnapshot,
     billing: { currency: pricingSnapshot.currency },
     chargingPredictions: {
@@ -375,38 +446,53 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
   await booking.save();
   bookingMonitor.syncBooking(booking);
 
-  const notices =
-    expectedFullAt < slotEnd
-      ? [
-          "Battery expected to reach 100% before slot ends. Please vacate to avoid idle fees.",
-        ]
-      : [];
+  const notices = [];
+  if (expectedFullAt < slotEnd) {
+    notices.push("Battery expected to reach 100% before slot ends. Please vacate to avoid idle fees.");
+  }
+  if (paymentMethod === PAYMENT_METHODS.ONSITE) {
+    notices.push("Onsite payment is required for this session.");
+  }
 
   res.status(201).json({
     message: "Charging session started",
     session: payload,
+    payment: { method: paymentMethod },
     notices,
   });
 });
 
+/**
+ * POST /sessions/:id/stop
+ * - Driver: chỉ dừng được session của mình.
+ * - Staff/Admin: có thể dừng bất kỳ session (bỏ ràng buộc user).
+ * - Gửi thông báo role-aware.
+ */
 exports.stopSession = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const userId = ensureRequestUserId(req);
 
-  const session = await Session.findOne(buildSessionQuery(userId, id));
+  const actor = ensureRequestUser(req);
+  const actorRole = actor?.role || ROLES.DRIVER;
+  const actorId = ensureRequestUserId(req);
+
+  const sessionQueryOptions = actorRole === ROLES.DRIVER ? {} : { ignoreUser: true };
+  const sessionUserConstraint = actorRole === ROLES.DRIVER ? actorId : null;
+
+  const session = await Session.findOne(
+    buildSessionQuery(sessionUserConstraint, id, sessionQueryOptions)
+  );
   if (!session) throw new HttpError(404, "Session not found");
 
-  if (
-    ![SESSION_STATUS.CHARGING, SESSION_STATUS.COMPLETED].includes(
-      session.status
-    )
-  ) {
+  if (![SESSION_STATUS.CHARGING, SESSION_STATUS.COMPLETED].includes(session.status)) {
     throw new HttpError(409, "Session cannot be stopped in its current state");
   }
 
   const now = new Date();
   const finalized = await completeSession(session, { stoppedAt: now });
   if (!finalized) throw new HttpError(500, "Failed to finalize session");
+
+  await Session.updateOne({ _id: finalized._id }, { $set: { stoppedBy: actorId } });
+  finalized.stoppedBy = actorId;
 
   const payload = baseSessionPayload(finalized);
   finalizeSessionBroadcast(payload);
@@ -427,12 +513,10 @@ exports.stopSession = asyncHandler(async (req, res) => {
     notices.push("Vehicle reached 100%. Please free the connector.");
   }
   if (finalized.idleFeeIntervalsApplied > 0) {
-    notices.push(
-      `Idle fees applied for ${finalized.idleFeeIntervalsApplied} interval(s).`
-    );
+    notices.push(`Idle fees applied for ${finalized.idleFeeIntervalsApplied} interval(s).`);
   }
 
-  await notifySessionStoppedByAdmin(finalized);
+  await notifySessionStoppedByOperator(finalized, { id: actorId, role: actorRole });
 
   res.json({
     message: "Charging session stopped",
@@ -441,6 +525,10 @@ exports.stopSession = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * GET /sessions
+ * Query: status, userId, stationId, connectorId, from, to, search, page, limit, sort
+ */
 exports.listSessions = asyncHandler(async (req, res) => {
   const {
     status,
@@ -469,10 +557,7 @@ exports.listSessions = asyncHandler(async (req, res) => {
   if (search) {
     const keyword = String(search).trim();
     if (keyword) {
-      const regex = new RegExp(
-        keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
-        "i"
-      );
+      const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       const or = [
         { id: keyword },
         { bookingRef: keyword },
@@ -559,6 +644,9 @@ exports.listSessions = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * GET /sessions/:id
+ */
 exports.getSession = asyncHandler(async (req, res) => {
   const session = await Session.findOne({
     $or: [{ id: req.params.id }, { _id: toObjectId(req.params.id) }],
@@ -604,7 +692,7 @@ exports.getSession = asyncHandler(async (req, res) => {
       },
     },
     { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
-  ]).then((res) => (res[0] ? shapeSession(res[0]) : null));
+  ]).then((agg) => (agg[0] ? shapeSession(agg[0]) : null));
 
   res.json({ session: detailed });
 });
