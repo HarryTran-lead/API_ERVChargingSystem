@@ -17,7 +17,7 @@ const server = http.createServer(app);
 
 // socket.io
 setupSocketServer(server);
-
+require("./cron/dailyAIReport");
 // connect DB
 connectDB();
 
@@ -62,6 +62,8 @@ app.use('/api/v1/admin/wallet', require('./routes/v1/walletAdminRoutes'));
 
 app.use('/api/v1/admin', require('./routes/v1/adminRoutes'));
 app.use('/api/v1/staff', require('./routes/v1/staffRoutes'));
+
+app.use("/api/v1/ai", require("./routes/v1/aiRoutes"));
 // 404 fallback
 app.use((req, res) => {
   res.status(404).json({
