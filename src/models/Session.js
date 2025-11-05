@@ -1,7 +1,6 @@
 const mongoose = require("mongoose");
 const { v4: uuidv4 } = require("uuid");
-const { SESSION_STATUS_VALUES } = require("../constants/enums");
-
+const { SESSION_STATUS_VALUES, PAYMENT_METHODS } = require("../constants/enums");
 const SessionSchema = new mongoose.Schema(
   {
     id: { type: String, default: uuidv4, unique: true },
@@ -25,6 +24,13 @@ const SessionSchema = new mongoose.Schema(
       ref: "Connector",
       required: true,
       index: true,
+    },
+    operatorId: { type: String, ref: "User", index: true },
+    stoppedBy: { type: String, ref: "User" },
+    paymentMethod: {
+      type: String,
+      enum: Object.values(PAYMENT_METHODS),
+      default: PAYMENT_METHODS.WALLET,
     },
     status: {
       type: String,

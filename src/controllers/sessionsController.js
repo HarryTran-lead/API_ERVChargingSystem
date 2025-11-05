@@ -1,16 +1,48 @@
-const mongoose = require('mongoose');
-const Session = require('../models/Session');
-const Booking = require('../models/Booking');
-const asyncHandler = require('../utils/asyncHandler');
-const { HttpError } = require('../utils/errors');
-const { SESSION_STATUS, BOOKING_STATUS } = require('../constants/enums');
-const { formatSessionDates, formatToVietnamTime } = require('../utils/timezoneHelpers');
-const { completeSession } = require('../services/sessionFinalizer');
-const { finalizeSessionBroadcast } = require('../services/chargingMonitor');
-const bookingMonitor = require('../services/bookingMonitor');
-const { safeNotifyUser } = require('../services/notificationService');
+const mongoose = require("mongoose");
+const Session = require("../models/Session");
+const Booking = require("../models/Booking");
+const Connector = require("../models/Connector");
+const Vehicle = require("../models/Vehicle");
+const Wallet = require("../models/Wallet");
+const Tariff = require("../models/Tariff");
 
-const STATUS_SET = new Set(Object.values(SESSION_STATUS));
+const asyncHandler = require("../utils/asyncHandler");
+const { HttpError } = require("../utils/errors");
+const { ensureRequestUser, ensureRequestUserId } = require("../utils/requestUser");
+const { BOOKING_STATUS, SESSION_STATUS, ROLES, PAYMENT_METHODS } = require("../constants/enums");
+const {
+  BOOKING_SLOT_MINUTES,
+  SESSION_MIN_BALANCE_BASE_VND,
+  SESSION_SOC_RANDOM_MIN,
+  SESSION_SOC_RANDOM_MAX,
+  SESSION_IDLE_FEE_INTERVAL_MINUTES,
+} = require("../constants/business");
+const { cancelNoShowJob } = require("../services/bookingScheduler");
+const {
+  startSessionBroadcast,
+  finalizeSessionBroadcast,
+} = require("../services/chargingMonitor");
+const bookingMonitor = require("../services/bookingMonitor");
+const { completeSession } = require("../services/sessionFinalizer");
+const {
+  formatSessionDates,
+  formatToVietnamTime,
+} = require("../utils/timezoneHelpers");
+const { safeNotifyUser } = require("../services/notificationService");
+const {
+  calculateChargeDurationFromSoc,
+  calculateChargePercentageIn30Min,
+  calculateTimeToFullCharge,
+} = require("../utils/algorithms");
+
+/* ======================= UTILS ======================= */
+const randomIntInclusive = (min, max) =>
+  Math.floor(Math.random() * (max - min + 1)) + min;
+
+const toNumber = (value, fallback = 0) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
 
 const toObjectId = (value) => {
   if (!value) return null;
@@ -26,67 +58,69 @@ const parseDate = (value) => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
+const STATUS_SET = new Set(Object.values(SESSION_STATUS));
+const PAYMENT_METHOD_SET = new Set(Object.values(PAYMENT_METHODS));
+const ONSITE_CAPABLE_ROLES = new Set([ROLES.STAFF, ROLES.ADMIN]);
+
 const parseStatuses = (raw) => {
   if (!raw) return [];
   return String(raw)
-    .split(',')
-    .map((token) => token.trim().toUpperCase())
-    .filter((token) => STATUS_SET.has(token));
+    .split(",")
+    .map((t) => t.trim().toUpperCase())
+    .filter((t) => STATUS_SET.has(t));
 };
 
 const parseSort = (raw) => {
   const defaultSort = { startedAt: -1 };
   if (!raw) return defaultSort;
 
-  const fields = String(raw)
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-
-  if (fields.length === 0) {
-    return defaultSort;
-  }
-
-  const allowed = new Set([
-    'startedAt',
-    'stoppedAt',
-    'createdAt',
-    'updatedAt',
-  ]);
-
+  const allowed = new Set(["startedAt", "stoppedAt", "createdAt", "updatedAt"]);
   const sortSpec = {};
-  fields.forEach((field) => {
-    let direction = 1;
-    let name = field;
-    if (field.startsWith('-')) {
-      direction = -1;
-      name = field.slice(1);
-    } else if (field.startsWith('+')) {
-      name = field.slice(1);
-    }
-
-    if (allowed.has(name)) {
-      sortSpec[name] = direction;
-    }
-  });
-
-  return Object.keys(sortSpec).length > 0 ? sortSpec : defaultSort;
+  String(raw)
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean)
+    .forEach((f) => {
+      let name = f;
+      let dir = 1;
+      if (f.startsWith("-")) {
+        dir = -1;
+        name = f.slice(1);
+      }
+      if (f.startsWith("+")) name = f.slice(1);
+      if (allowed.has(name)) sortSpec[name] = dir;
+    });
+  return Object.keys(sortSpec).length ? sortSpec : defaultSort;
 };
 
 const toPlain = (value) =>
-  value && typeof value.toObject === 'function' ? value.toObject() : value;
+  value && typeof value.toObject === "function" ? value.toObject() : value;
+
+const normalizePaymentMethod = (rawMethod, actorRole) => {
+  if (!rawMethod) return PAYMENT_METHODS.WALLET;
+  const normalized = String(rawMethod).trim().toUpperCase();
+  if (!PAYMENT_METHOD_SET.has(normalized)) {
+    throw new HttpError(400, "Unsupported payment method");
+  }
+  if (normalized === PAYMENT_METHODS.ONSITE && !ONSITE_CAPABLE_ROLES.has(actorRole)) {
+    throw new HttpError(403, "Onsite payments can only be initiated by staff or admin");
+  }
+  return normalized;
+};
 
 const baseSessionPayload = (sessionDoc) => {
   const session = formatSessionDates(toPlain(sessionDoc));
-
   return {
-    _id: session._id ? session._id.toString() : undefined,
+    _id: session._id?.toString(),
     id: session.id,
     bookingId: session.bookingRef || session.bookingId?.toString(),
     bookingRef: session.bookingRef,
     connectorId: session.connectorId?.toString(),
     stationId: session.stationId?.toString(),
     userId: session.userId,
+    operatorId: session.operatorId || null,
+    stoppedBy: session.stoppedBy || null,
+    paymentMethod: session.paymentMethod || PAYMENT_METHODS.WALLET,
     status: session.status,
     socStart: session.socStart,
     socEnd: session.socEnd,
@@ -104,37 +138,15 @@ const baseSessionPayload = (sessionDoc) => {
     minBalanceRequired: session.minBalanceRequired,
     pricing: session.pricing,
     billing: session.billing,
-    chargingPredictions:
-      session.chargingPredictions || {
-        chargePercentageIn30Min: 0,
-        timeToFullChargeMinutes: null,
-        energyChargedKwh: 0,
-        energyRemainingKwh: 0,
-      },
+    chargingPredictions: session.chargingPredictions || {
+      chargePercentageIn30Min: 0,
+      timeToFullChargeMinutes: null,
+      energyChargedKwh: 0,
+      energyRemainingKwh: 0,
+    },
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
   };
-};
-
-const notifySessionStoppedByAdmin = async (session) => {
-  if (!session?.userId) {
-    return;
-  }
-
-  await safeNotifyUser({
-    userId: session.userId,
-    title: 'Charging session stopped by admin',
-    body: `Your charging session ${session.id} was stopped by an administrator at ${
-      formatToVietnamTime(session.stoppedAt) || formatToVietnamTime(new Date())
-    }.`,
-    type: 'session',
-    data: {
-      sessionId: session.id,
-      bookingId: session.bookingRef || session.bookingId?.toString?.() || null,
-      status: session.status,
-      stoppedAt: formatToVietnamTime(session.stoppedAt),
-    },
-  });
 };
 
 const shapeSession = (doc) => {
@@ -157,7 +169,7 @@ const shapeSession = (doc) => {
       : null,
     station: station
       ? {
-          id: station._id ? station._id.toString() : null,
+          id: station._id?.toString() || null,
           name: station.name,
           code: station.code,
           status: station.status,
@@ -165,7 +177,7 @@ const shapeSession = (doc) => {
       : null,
     connector: connector
       ? {
-          id: connector._id ? connector._id.toString() : null,
+          id: connector._id?.toString() || null,
           code: connector.code,
           status: connector.status,
           type: connector.type,
@@ -184,6 +196,339 @@ const shapeSession = (doc) => {
   };
 };
 
+/** Notify when an operator/staff/admin stops a session (role-aware copy) */
+const notifySessionStoppedByOperator = async (session, actor = null) => {
+  if (!session?.userId) return;
+
+  const role = actor?.role || ROLES.ADMIN;
+  const roleLabel = (() => {
+    if (role === ROLES.STAFF) return "a station staff member";
+    if (role === ROLES.ADMIN) return "an administrator";
+    return "an operator";
+  })();
+
+  const stoppedAtHuman =
+    formatToVietnamTime(session.stoppedAt) || formatToVietnamTime(new Date());
+
+  const title =
+    role === ROLES.STAFF
+      ? "Charging session stopped by station staff"
+      : "Charging session stopped by administrator";
+
+  const body =
+    "Your charging session " +
+    session.id +
+    " was stopped by " +
+    roleLabel +
+    " at " +
+    stoppedAtHuman +
+    ".";
+
+  await safeNotifyUser({
+    userId: session.userId,
+    title,
+    body,
+    type: "session",
+    data: {
+      sessionId: session.id,
+      bookingId: session.bookingRef || session.bookingId?.toString() || null,
+      status: session.status,
+      stoppedAt: stoppedAtHuman,
+      operatorRole: role,
+      operatorId: actor?.id || actor?._id || null,
+    },
+  });
+};
+
+/** Build queries that can optionally ignore user constraint for staff/admin flows */
+const buildBookingQuery = (userId, reference, { ignoreUser = false } = {}) => {
+  const query = { $or: [{ id: reference }] };
+  if (mongoose.Types.ObjectId.isValid(reference)) {
+    query.$or.push({ _id: reference });
+  }
+  if (!ignoreUser && userId) {
+    query.userId = userId;
+  }
+  return query;
+};
+
+const buildSessionQuery = (userId, reference, { ignoreUser = false } = {}) => {
+  const query = { $or: [{ id: reference }] };
+  if (mongoose.Types.ObjectId.isValid(reference)) {
+    query.$or.push({ _id: reference });
+  }
+  if (!ignoreUser && userId) {
+    query.userId = userId;
+  }
+  return query;
+};
+
+const resolveConfiguredChargeDurationMinutes = () => {
+  const raw = process.env.SESSION_CHARGE_DURATION_MINUTES;
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const computeChargeDurationMinutes = (
+  socStart,
+  socTarget,
+  batteryKwh,
+  connectorPowerKw
+) => {
+  const configured = resolveConfiguredChargeDurationMinutes();
+  const maxMinutes = BOOKING_SLOT_MINUTES;
+  if (configured) return Math.min(maxMinutes, Math.round(configured));
+  if (batteryKwh && connectorPowerKw) {
+    const calculated = calculateChargeDurationFromSoc(
+      socStart,
+      socTarget || 100,
+      batteryKwh,
+      connectorPowerKw
+    );
+    return Math.min(maxMinutes, Math.round(calculated));
+  }
+  return maxMinutes;
+};
+
+/* ======================= CONTROLLERS ======================= */
+
+/**
+ * POST /sessions/startImmediateCharge
+ * Body: { bookingId, paymentMethod? }
+ * - Driver: chỉ được start booking của chính mình.
+ * - Staff/Admin: có thể start booking của người khác (bỏ ràng buộc user).
+ * - Ví: chỉ kiểm tra số dư khi paymentMethod = WALLET.
+ * - Onsite: chỉ STAFF/ADMIN được phép.
+ */
+exports.startImmediateCharge = asyncHandler(async (req, res) => {
+  const { bookingId, paymentMethod: rawPaymentMethod } = req.body;
+  if (!bookingId) throw new HttpError(400, "bookingId is required");
+
+  const operator = ensureRequestUser(req);
+  const operatorRole = operator?.role || ROLES.DRIVER;
+  const operatorId = ensureRequestUserId(req);
+
+  const bookingQueryOptions =
+    operatorRole === ROLES.DRIVER ? {} : { ignoreUser: true };
+  const bookingUserConstraint = operatorRole === ROLES.DRIVER ? operatorId : null;
+
+  const booking = await Booking.findOne(
+    buildBookingQuery(bookingUserConstraint, bookingId, bookingQueryOptions)
+  );
+  if (!booking) throw new HttpError(404, "Booking not found");
+  if (booking.status !== BOOKING_STATUS.RESERVED) {
+    throw new HttpError(409, "Booking is not ready for check-in");
+  }
+
+  // Driver không được start booking của người khác
+  if (operatorRole === ROLES.DRIVER && booking.userId !== operatorId) {
+    throw new HttpError(403, "You are not allowed to start this booking");
+  }
+
+  const now = new Date();
+  if (now > new Date(booking.checkInDeadline)) {
+    throw new HttpError(409, "Booking check-in window has expired");
+  }
+
+  if (await Session.findOne({ bookingId: booking._id })) {
+    throw new HttpError(409, "Session already exists for this booking");
+  }
+
+  const targetUserId = booking.userId;
+  const paymentMethod = normalizePaymentMethod(rawPaymentMethod, operatorRole);
+
+  // Chỉ kiểm tra ví nếu thanh toán bằng ví
+  if (paymentMethod === PAYMENT_METHODS.WALLET) {
+    const wallet = await Wallet.findOne({ user_id: targetUserId });
+    if (!wallet || wallet.balance < SESSION_MIN_BALANCE_BASE_VND) {
+      throw new HttpError(
+        402,
+        `Minimum balance of ${SESSION_MIN_BALANCE_BASE_VND.toLocaleString()} VND is required`
+      );
+    }
+  }
+
+  const connector = await Connector.findOneAndUpdate(
+    { _id: booking.connectorId, status: "RESERVED" },
+    { status: "CHARGING" },
+    { new: true }
+  );
+  if (!connector) throw new HttpError(409, "Connector is no longer reserved");
+
+  cancelNoShowJob(booking._id);
+
+  let batteryKwh =
+    booking.vehicle?.batteryKwh > 0 ? booking.vehicle.batteryKwh : null;
+  if (!batteryKwh && booking.vehicleId) {
+    const vehicle = await Vehicle.findOne({ id: booking.vehicleId, userId: targetUserId })
+      .select("batteryKwh")
+      .lean();
+    if (vehicle?.batteryKwh > 0) batteryKwh = vehicle.batteryKwh;
+  }
+
+  const connectorPowerKw = connector.powerKw > 0 ? connector.powerKw : null;
+  const socStart = randomIntInclusive(SESSION_SOC_RANDOM_MIN, SESSION_SOC_RANDOM_MAX);
+  const chargeDurationMinutes = computeChargeDurationMinutes(
+    socStart,
+    100,
+    batteryKwh,
+    connectorPowerKw
+  );
+
+  const startedAt = now;
+  const slotEnd = new Date(booking.slotEnd);
+  const availableMinutes = Math.max(1, Math.ceil((slotEnd - startedAt) / 60000));
+  const finalDuration = Math.min(chargeDurationMinutes, availableMinutes);
+  const expectedFullAt = new Date(startedAt.getTime() + finalDuration * 60 * 1000);
+
+  const chargePercentageIn30Min =
+    batteryKwh && connectorPowerKw
+      ? calculateChargePercentageIn30Min(socStart, batteryKwh, connectorPowerKw)
+      : 0;
+  const timeToFullChargeMinutes =
+    batteryKwh && connectorPowerKw
+      ? calculateTimeToFullCharge(socStart, batteryKwh, connectorPowerKw)
+      : null;
+  const energyRemainingKwh = batteryKwh ? ((100 - socStart) / 100) * batteryKwh : 0;
+
+  const tariff = await Tariff.findEffectiveAt(
+    booking.stationId,
+    connector.type,
+    startedAt
+  );
+  const pricingSnapshot = tariff
+    ? {
+        tariffId: tariff._id,
+        mode: tariff.mode,
+        connectorType: tariff.connectorType,
+        pricePerMin: toNumber(tariff.pricePerMin, 0),
+        idleFeePerMin: toNumber(tariff.idleFeePerMin, 0),
+        pricePerKwh: toNumber(tariff.pricePerKwh, 0),
+        graceMin: toNumber(tariff.graceMin, 0),
+        currency: "VND",
+        effectiveFrom: tariff.effectiveFrom,
+      }
+    : { currency: "VND" };
+
+  const session = await Session.create({
+    bookingId: booking._id,
+    bookingRef: booking.id,
+    userId: targetUserId,
+    operatorId,
+    paymentMethod,
+    stationId: booking.stationId,
+    connectorId: booking.connectorId,
+    status: SESSION_STATUS.CHARGING,
+    socStart,
+    socTarget: 100,
+    startedAt,
+    expectedFullAt,
+    idleFeeNoticeAt: expectedFullAt < slotEnd ? expectedFullAt : null,
+    slotEnd,
+    chargeDurationMinutes: finalDuration,
+    idleFeeIntervalMinutes: SESSION_IDLE_FEE_INTERVAL_MINUTES,
+    minBalanceRequired: paymentMethod === PAYMENT_METHODS.WALLET ? SESSION_MIN_BALANCE_BASE_VND : 0,
+    pricing: pricingSnapshot,
+    billing: { currency: pricingSnapshot.currency },
+    chargingPredictions: {
+      chargePercentageIn30Min,
+      timeToFullChargeMinutes,
+      energyChargedKwh: 0,
+      energyRemainingKwh,
+    },
+  });
+
+  const payload = baseSessionPayload(session);
+  startSessionBroadcast(payload, { batteryKwh, connectorPowerKw });
+
+  booking.status = BOOKING_STATUS.CHECKED_IN;
+  await booking.save();
+  bookingMonitor.syncBooking(booking);
+
+  const notices = [];
+  if (expectedFullAt < slotEnd) {
+    notices.push("Battery expected to reach 100% before slot ends. Please vacate to avoid idle fees.");
+  }
+  if (paymentMethod === PAYMENT_METHODS.ONSITE) {
+    notices.push("Onsite payment is required for this session.");
+  }
+
+  res.status(201).json({
+    message: "Charging session started",
+    session: payload,
+    payment: { method: paymentMethod },
+    notices,
+  });
+});
+
+/**
+ * POST /sessions/:id/stop
+ * - Driver: chỉ dừng được session của mình.
+ * - Staff/Admin: có thể dừng bất kỳ session (bỏ ràng buộc user).
+ * - Gửi thông báo role-aware.
+ */
+exports.stopSession = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const actor = ensureRequestUser(req);
+  const actorRole = actor?.role || ROLES.DRIVER;
+  const actorId = ensureRequestUserId(req);
+
+  const sessionQueryOptions = actorRole === ROLES.DRIVER ? {} : { ignoreUser: true };
+  const sessionUserConstraint = actorRole === ROLES.DRIVER ? actorId : null;
+
+  const session = await Session.findOne(
+    buildSessionQuery(sessionUserConstraint, id, sessionQueryOptions)
+  );
+  if (!session) throw new HttpError(404, "Session not found");
+
+  if (![SESSION_STATUS.CHARGING, SESSION_STATUS.COMPLETED].includes(session.status)) {
+    throw new HttpError(409, "Session cannot be stopped in its current state");
+  }
+
+  const now = new Date();
+  const finalized = await completeSession(session, { stoppedAt: now });
+  if (!finalized) throw new HttpError(500, "Failed to finalize session");
+
+  await Session.updateOne({ _id: finalized._id }, { $set: { stoppedBy: actorId } });
+  finalized.stoppedBy = actorId;
+
+  const payload = baseSessionPayload(finalized);
+  finalizeSessionBroadcast(payload);
+
+  if (finalized.bookingId) {
+    const booking = await Booking.findById(finalized.bookingId);
+    if (booking && booking.status !== BOOKING_STATUS.COMPLETED) {
+      booking.status = BOOKING_STATUS.COMPLETED;
+      await booking.save();
+      bookingMonitor.syncBooking(booking);
+    }
+  }
+
+  await Connector.findByIdAndUpdate(finalized.connectorId, { status: "IDLE" });
+
+  const notices = [];
+  if (finalized.socEnd >= 100 && now < finalized.slotEnd) {
+    notices.push("Vehicle reached 100%. Please free the connector.");
+  }
+  if (finalized.idleFeeIntervalsApplied > 0) {
+    notices.push(`Idle fees applied for ${finalized.idleFeeIntervalsApplied} interval(s).`);
+  }
+
+  await notifySessionStoppedByOperator(finalized, { id: actorId, role: actorRole });
+
+  res.json({
+    message: "Charging session stopped",
+    session: payload,
+    notices,
+  });
+});
+
+/**
+ * GET /sessions
+ * Query: status, userId, stationId, connectorId, from, to, search, page, limit, sort
+ */
 exports.listSessions = asyncHandler(async (req, res) => {
   const {
     status,
@@ -198,60 +543,33 @@ exports.listSessions = asyncHandler(async (req, res) => {
     sort,
   } = req.query;
 
-  const statuses = parseStatuses(status);
   const match = {};
-  if (statuses.length > 0) {
-    match.status = { $in: statuses };
-  }
-  if (userId) {
-    match.userId = userId;
-  }
-  const stationObjectId = toObjectId(stationId);
-  if (stationObjectId) {
-    match.stationId = stationObjectId;
-  }
-  const connectorObjectId = toObjectId(connectorId);
-  if (connectorObjectId) {
-    match.connectorId = connectorObjectId;
-  }
-
-  const startDate = parseDate(from);
-  const endDate = parseDate(to);
-  if (startDate || endDate) {
+  if (status) match.status = { $in: parseStatuses(status) };
+  if (userId) match.userId = userId;
+  if (stationId) match.stationId = toObjectId(stationId);
+  if (connectorId) match.connectorId = toObjectId(connectorId);
+  if (from || to) {
     match.startedAt = {};
-    if (startDate) {
-      match.startedAt.$gte = startDate;
-    }
-    if (endDate) {
-      match.startedAt.$lte = endDate;
-    }
+    if (from) match.startedAt.$gte = parseDate(from);
+    if (to) match.startedAt.$lte = parseDate(to);
   }
 
   if (search) {
     const keyword = String(search).trim();
     if (keyword) {
-      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const regex = new RegExp(escaped, 'i');
-      const orConditions = [
+      const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      const or = [
         { id: keyword },
         { bookingRef: keyword },
         { userId: keyword },
-        { 'billing.currency': keyword },
         { id: { $regex: regex } },
       ];
-      if (match.$and) {
-        match.$and.push({ $or: orConditions });
-      } else if (match.$or) {
-        match.$and = [{ $or: match.$or }, { $or: orConditions }];
-        delete match.$or;
-      } else {
-        match.$or = orConditions;
-      }
+      match.$or ? (match.$and = [match, { $or }]) : (match.$or = or);
     }
   }
 
-  const pageNumber = Math.max(1, Number(page) || 1);
-  const pageSize = Math.min(100, Math.max(1, Number(limit) || 20));
+  const pageNumber = Math.max(1, Number(page));
+  const pageSize = Math.min(100, Math.max(1, Number(limit)));
   const skip = (pageNumber - 1) * pageSize;
   const sortSpec = parseSort(sort);
 
@@ -259,173 +577,122 @@ exports.listSessions = asyncHandler(async (req, res) => {
     { $match: match },
     {
       $facet: {
-        metadata: [{ $count: 'total' }],
+        metadata: [{ $count: "total" }],
         items: [
           { $sort: sortSpec },
           { $skip: skip },
           { $limit: pageSize },
           {
             $lookup: {
-              from: 'bookings',
-              localField: 'bookingId',
-              foreignField: '_id',
-              as: 'booking',
+              from: "bookings",
+              localField: "bookingId",
+              foreignField: "_id",
+              as: "booking",
             },
           },
-          { $unwind: { path: '$booking', preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: "$booking", preserveNullAndEmptyArrays: true } },
           {
             $lookup: {
-              from: 'stations',
-              localField: 'stationId',
-              foreignField: '_id',
-              as: 'station',
+              from: "stations",
+              localField: "stationId",
+              foreignField: "_id",
+              as: "station",
             },
           },
-          { $unwind: { path: '$station', preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: "$station", preserveNullAndEmptyArrays: true } },
           {
             $lookup: {
-              from: 'connectors',
-              localField: 'connectorId',
-              foreignField: '_id',
-              as: 'connector',
+              from: "connectors",
+              localField: "connectorId",
+              foreignField: "_id",
+              as: "connector",
             },
           },
-          { $unwind: { path: '$connector', preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: "$connector", preserveNullAndEmptyArrays: true } },
           {
             $lookup: {
-              from: 'users',
-              localField: 'userId',
-              foreignField: 'id',
-              as: 'user',
+              from: "users",
+              localField: "userId",
+              foreignField: "id",
+              as: "user",
             },
           },
-          { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
         ],
       },
     },
     {
       $project: {
         items: 1,
-        total: { $ifNull: [{ $first: '$metadata.total' }, 0] },
+        total: { $ifNull: [{ $first: "$metadata.total" }, 0] },
       },
     },
   ];
 
   const [result] = await Session.aggregate(pipeline);
   const total = result?.total || 0;
-  const items = (result?.items || []).map((doc) => shapeSession(doc));
+  const items = (result?.items || []).map(shapeSession);
 
   res.json({
     pagination: {
       page: pageNumber,
       limit: pageSize,
       total,
-      pages: pageSize > 0 ? Math.ceil(total / pageSize) : 0,
+      pages: Math.ceil(total / pageSize),
     },
     items,
   });
 });
 
-const findSessionByParam = async (param) => {
-  const query = { $or: [{ id: param }] };
-  if (mongoose.Types.ObjectId.isValid(param)) {
-    query.$or.push({ _id: new mongoose.Types.ObjectId(param) });
-  }
-  return Session.findOne(query);
-};
+/**
+ * GET /sessions/:id
+ */
+exports.getSession = asyncHandler(async (req, res) => {
+  const session = await Session.findOne({
+    $or: [{ id: req.params.id }, { _id: toObjectId(req.params.id) }],
+  });
 
-const populateSessionDetails = async (session) => {
-  if (!session) return null;
+  if (!session) throw new HttpError(404, "Session not found");
 
-  const result = await Session.aggregate([
+  const detailed = await Session.aggregate([
     { $match: { _id: session._id } },
     {
       $lookup: {
-        from: 'bookings',
-        localField: 'bookingId',
-        foreignField: '_id',
-        as: 'booking',
+        from: "bookings",
+        localField: "bookingId",
+        foreignField: "_id",
+        as: "booking",
       },
     },
-    { $unwind: { path: '$booking', preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: "$booking", preserveNullAndEmptyArrays: true } },
     {
       $lookup: {
-        from: 'stations',
-        localField: 'stationId',
-        foreignField: '_id',
-        as: 'station',
+        from: "stations",
+        localField: "stationId",
+        foreignField: "_id",
+        as: "station",
       },
     },
-    { $unwind: { path: '$station', preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: "$station", preserveNullAndEmptyArrays: true } },
     {
       $lookup: {
-        from: 'connectors',
-        localField: 'connectorId',
-        foreignField: '_id',
-        as: 'connector',
+        from: "connectors",
+        localField: "connectorId",
+        foreignField: "_id",
+        as: "connector",
       },
     },
-    { $unwind: { path: '$connector', preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: "$connector", preserveNullAndEmptyArrays: true } },
     {
       $lookup: {
-        from: 'users',
-        localField: 'userId',
-        foreignField: 'id',
-        as: 'user',
+        from: "users",
+        localField: "userId",
+        foreignField: "id",
+        as: "user",
       },
     },
-    { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
-  ]);
+    { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+  ]).then((agg) => (agg[0] ? shapeSession(agg[0]) : null));
 
-  return result.length > 0 ? shapeSession(result[0]) : null;
-};
-
-exports.getSession = asyncHandler(async (req, res) => {
-  const session = await findSessionByParam(req.params.id);
-  if (!session) {
-    throw new HttpError(404, 'Session not found');
-  }
-
-  const detailed = await populateSessionDetails(session);
   res.json({ session: detailed });
-});
-
-exports.stopSession = asyncHandler(async (req, res) => {
-  const session = await findSessionByParam(req.params.id);
-  if (!session) {
-    throw new HttpError(404, 'Session not found');
-  }
-
-  const stoppable = [SESSION_STATUS.CHARGING, SESSION_STATUS.COMPLETED];
-  if (!stoppable.includes(session.status)) {
-    throw new HttpError(409, 'Session cannot be stopped in its current state');
-  }
-  if (!session.startedAt) {
-    throw new HttpError(500, 'Session start timestamp is missing');
-  }
-
-  const finalized = await completeSession(session, { stoppedAt: new Date() });
-  if (!finalized) {
-    throw new HttpError(500, 'Failed to finalize the session');
-  }
-
-  const broadcastPayload = baseSessionPayload(finalized);
-  finalizeSessionBroadcast(broadcastPayload);
-
-  if (finalized.bookingId) {
-    const booking = await Booking.findById(finalized.bookingId);
-    if (booking && booking.status !== BOOKING_STATUS.COMPLETED) {
-      booking.status = BOOKING_STATUS.COMPLETED;
-      await booking.save();
-      bookingMonitor.syncBooking(booking);
-    }
-  }
-
-  const detailed = (await populateSessionDetails(finalized)) || broadcastPayload;
-  await notifySessionStoppedByAdmin(finalized);
-
-  res.json({
-    message: 'Session stopped successfully',
-    session: detailed,
-  });
 });

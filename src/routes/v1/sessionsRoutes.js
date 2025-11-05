@@ -1,15 +1,12 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-
-const { protect } = require('../../middlewares/authMiddleware');
-const { ROLES } = require('../../constants/enums');
-const sessionsController = require('../../controllers/sessionsController');
+const sessionsController = require("../../controllers/sessionsController");
+const { protect } = require("../../middlewares/authMiddleware");
+const { ROLES } = require("../../constants/enums");
 
 router.use(protect([ROLES.DRIVER, ROLES.ADMIN, ROLES.STAFF]));
 
-//  Bỏ dòng dưới vì không có handler trong controller
-// router.post('/start', sessionsController.startImmediateCharge);
-
-router.post('/:id/stop', sessionsController.stopSession);
+router.post("/start", sessionsController.startImmediateCharge);
+router.post("/:id/stop", sessionsController.stopSession);
 
 module.exports = router;
