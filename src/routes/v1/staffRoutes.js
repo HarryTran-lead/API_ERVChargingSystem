@@ -12,5 +12,7 @@ router.post('/payments/onsite', operations.recordOnsitePayment);
 router.post('/incidents', operations.reportIncident);
 router.get('/incidents', operations.listIncidentReports);
 router.patch('/incidents/:id/status', operations.updateIncidentStatus);
-
+router.post('/bookings/proxy', operations.createProxyBooking);
+router.get('/sessions/:id/invoice', operations.getSessionInvoice);
+router.get('/invoices', operations.listInvoices);
 module.exports = router;

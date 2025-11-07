@@ -1,43 +1,44 @@
-const mongoose = require("mongoose");
-const Session = require("../models/Session");
-const Booking = require("../models/Booking");
-const Connector = require("../models/Connector");
-const Vehicle = require("../models/Vehicle");
-const Wallet = require("../models/Wallet");
-const Tariff = require("../models/Tariff");
+// src/controllers/sessionsController.js
+const mongoose = require('mongoose');
+const Session = require('../models/Session');
+const Booking = require('../models/Booking');
+const Connector = require('../models/Connector');
+const Vehicle = require('../models/Vehicle');
+const Wallet = require('../models/Wallet');
+const Tariff = require('../models/Tariff');
+const Invoice = require('../models/Invoice');
 
-const asyncHandler = require("../utils/asyncHandler");
-const { HttpError } = require("../utils/errors");
-const { ensureRequestUser, ensureRequestUserId } = require("../utils/requestUser");
-const { BOOKING_STATUS, SESSION_STATUS, ROLES, PAYMENT_METHODS } = require("../constants/enums");
+const asyncHandler = require('../utils/asyncHandler');
+const { HttpError } = require('../utils/errors');
+const { ensureRequestUser, ensureRequestUserId } = require('../utils/requestUser');
+const { BOOKING_STATUS, SESSION_STATUS, ROLES, PAYMENT_METHODS } = require('../constants/enums');
 const {
   BOOKING_SLOT_MINUTES,
   SESSION_MIN_BALANCE_BASE_VND,
   SESSION_SOC_RANDOM_MIN,
   SESSION_SOC_RANDOM_MAX,
   SESSION_IDLE_FEE_INTERVAL_MINUTES,
-} = require("../constants/business");
-const { cancelNoShowJob } = require("../services/bookingScheduler");
+} = require('../constants/business');
+const { cancelNoShowJob } = require('../services/bookingScheduler');
+const { startSessionBroadcast, finalizeSessionBroadcast } = require('../services/chargingMonitor');
+const bookingMonitor = require('../services/bookingMonitor');
+const { completeSession } = require('../services/sessionFinalizer');
+const { formatSessionDates, formatToVietnamTime, formatInvoiceDates } = require('../utils/timezoneHelpers');
+const { safeNotifyUser } = require('../services/notificationService');
 const {
-  startSessionBroadcast,
-  finalizeSessionBroadcast,
-} = require("../services/chargingMonitor");
-const bookingMonitor = require("../services/bookingMonitor");
-const { completeSession } = require("../services/sessionFinalizer");
-const {
-  formatSessionDates,
-  formatToVietnamTime,
-} = require("../utils/timezoneHelpers");
-const { safeNotifyUser } = require("../services/notificationService");
+  resolveUserMembership,
+  applyMembershipPricing,
+  computeMinBalanceRequirement,
+} = require('../services/membershipBenefits');
+const { settleSessionPayment } = require('../services/sessionPaymentSettlement');
 const {
   calculateChargeDurationFromSoc,
   calculateChargePercentageIn30Min,
   calculateTimeToFullCharge,
-} = require("../utils/algorithms");
+} = require('../utils/algorithms');
 
 /* ======================= UTILS ======================= */
-const randomIntInclusive = (min, max) =>
-  Math.floor(Math.random() * (max - min + 1)) + min;
+const randomIntInclusive = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
 const toNumber = (value, fallback = 0) => {
   const parsed = Number(value);
@@ -65,7 +66,7 @@ const ONSITE_CAPABLE_ROLES = new Set([ROLES.STAFF, ROLES.ADMIN]);
 const parseStatuses = (raw) => {
   if (!raw) return [];
   return String(raw)
-    .split(",")
+    .split(',')
     .map((t) => t.trim().toUpperCase())
     .filter((t) => STATUS_SET.has(t));
 };
@@ -74,36 +75,35 @@ const parseSort = (raw) => {
   const defaultSort = { startedAt: -1 };
   if (!raw) return defaultSort;
 
-  const allowed = new Set(["startedAt", "stoppedAt", "createdAt", "updatedAt"]);
+  const allowed = new Set(['startedAt', 'stoppedAt', 'createdAt', 'updatedAt']);
   const sortSpec = {};
   String(raw)
-    .split(",")
+    .split(',')
     .map((f) => f.trim())
     .filter(Boolean)
     .forEach((f) => {
       let name = f;
       let dir = 1;
-      if (f.startsWith("-")) {
+      if (f.startsWith('-')) {
         dir = -1;
         name = f.slice(1);
       }
-      if (f.startsWith("+")) name = f.slice(1);
+      if (f.startsWith('+')) name = f.slice(1);
       if (allowed.has(name)) sortSpec[name] = dir;
     });
   return Object.keys(sortSpec).length ? sortSpec : defaultSort;
 };
 
-const toPlain = (value) =>
-  value && typeof value.toObject === "function" ? value.toObject() : value;
+const toPlain = (value) => (value && typeof value.toObject === 'function' ? value.toObject() : value);
 
 const normalizePaymentMethod = (rawMethod, actorRole) => {
   if (!rawMethod) return PAYMENT_METHODS.WALLET;
   const normalized = String(rawMethod).trim().toUpperCase();
   if (!PAYMENT_METHOD_SET.has(normalized)) {
-    throw new HttpError(400, "Unsupported payment method");
+    throw new HttpError(400, 'Unsupported payment method');
   }
   if (normalized === PAYMENT_METHODS.ONSITE && !ONSITE_CAPABLE_ROLES.has(actorRole)) {
-    throw new HttpError(403, "Onsite payments can only be initiated by staff or admin");
+    throw new HttpError(403, 'Onsite payments can only be initiated by staff or admin');
   }
   return normalized;
 };
@@ -138,6 +138,7 @@ const baseSessionPayload = (sessionDoc) => {
     minBalanceRequired: session.minBalanceRequired,
     pricing: session.pricing,
     billing: session.billing,
+    walkInInfo: session.walkInInfo || null,
     chargingPredictions: session.chargingPredictions || {
       chargePercentageIn30Min: 0,
       timeToFullChargeMinutes: null,
@@ -151,13 +152,14 @@ const baseSessionPayload = (sessionDoc) => {
 
 const shapeSession = (doc) => {
   if (!doc) return null;
+  const payload = baseSessionPayload(doc);
   const booking = toPlain(doc.booking) || null;
   const station = toPlain(doc.station) || null;
   const connector = toPlain(doc.connector) || null;
   const user = toPlain(doc.user) || null;
 
   return {
-    ...baseSessionPayload(doc),
+    ...payload,
     booking: booking
       ? {
           id: booking.id,
@@ -202,33 +204,23 @@ const notifySessionStoppedByOperator = async (session, actor = null) => {
 
   const role = actor?.role || ROLES.ADMIN;
   const roleLabel = (() => {
-    if (role === ROLES.STAFF) return "a station staff member";
-    if (role === ROLES.ADMIN) return "an administrator";
-    return "an operator";
+    if (role === ROLES.STAFF) return 'a station staff member';
+    if (role === ROLES.ADMIN) return 'an administrator';
+    return 'an operator';
   })();
 
-  const stoppedAtHuman =
-    formatToVietnamTime(session.stoppedAt) || formatToVietnamTime(new Date());
+  const stoppedAtHuman = formatToVietnamTime(session.stoppedAt) || formatToVietnamTime(new Date());
 
   const title =
-    role === ROLES.STAFF
-      ? "Charging session stopped by station staff"
-      : "Charging session stopped by administrator";
+    role === ROLES.STAFF ? 'Charging session stopped by station staff' : 'Charging session stopped by administrator';
 
-  const body =
-    "Your charging session " +
-    session.id +
-    " was stopped by " +
-    roleLabel +
-    " at " +
-    stoppedAtHuman +
-    ".";
+  const body = 'Your charging session ' + session.id + ' was stopped by ' + roleLabel + ' at ' + stoppedAtHuman + '.';
 
   await safeNotifyUser({
     userId: session.userId,
     title,
     body,
-    type: "session",
+    type: 'session',
     data: {
       sessionId: session.id,
       bookingId: session.bookingRef || session.bookingId?.toString() || null,
@@ -236,6 +228,94 @@ const notifySessionStoppedByOperator = async (session, actor = null) => {
       stoppedAt: stoppedAtHuman,
       operatorRole: role,
       operatorId: actor?.id || actor?._id || null,
+    },
+  });
+};
+
+const notifySessionStarted = async (session, booking = null) => {
+  if (!session?.userId) return;
+
+  const startedAtHuman = formatToVietnamTime(session.startedAt) || formatToVietnamTime(new Date());
+
+  const parts = [`Your charging session ${session.id} has started at ${startedAtHuman}.`];
+
+  if (session.expectedFullAt) {
+    parts.push(`Estimated completion: ${formatToVietnamTime(session.expectedFullAt) || 'unknown'}.`);
+  }
+
+  if (booking?.slotEnd) {
+    parts.push(`Slot ends at ${formatToVietnamTime(booking.slotEnd)}. Please plan accordingly.`);
+  }
+
+  await safeNotifyUser({
+    userId: session.userId,
+    title: 'Charging session started',
+    body: parts.join(' '),
+    type: 'session',
+    data: {
+      sessionId: session.id,
+      bookingId: session.bookingRef || session.bookingId?.toString() || null,
+      status: session.status,
+      startedAt: startedAtHuman,
+      expectedFullAt: formatToVietnamTime(session.expectedFullAt),
+    },
+  });
+};
+
+const notifySessionCompleted = async (session, settlement = null) => {
+  if (!session?.userId) return;
+
+  const stoppedAtHuman = formatToVietnamTime(session.stoppedAt) || formatToVietnamTime(new Date());
+
+  const parts = [`Your charging session ${session.id} completed at ${stoppedAtHuman}.`];
+
+  const totalAmount = Number(session.billing?.totalAmount || 0);
+  if (totalAmount > 0) {
+    parts.push(`Total due: ${totalAmount.toLocaleString()} VND.`);
+  }
+
+  if (settlement?.status === 'FAILED' && settlement.reason === 'INSUFFICIENT_FUNDS') {
+    parts.push('Wallet balance was insufficient. Please top up or pay onsite to settle the invoice.');
+  }
+
+  await safeNotifyUser({
+    userId: session.userId,
+    title: 'Charging session completed',
+    body: parts.join(' '),
+    type: 'session',
+    data: {
+      sessionId: session.id,
+      bookingId: session.bookingRef || session.bookingId?.toString() || null,
+      status: session.status,
+      stoppedAt: stoppedAtHuman,
+      totalAmount,
+    },
+  });
+};
+
+const notifyInvoiceIssued = async (invoiceDoc) => {
+  if (!invoiceDoc) return;
+  const invoice = formatInvoiceDates(invoiceDoc);
+  if (!invoice?.user_id) return;
+
+  const bodyParts = [`Invoice ${invoice.id} has been issued for session ${invoice.session_id}.`];
+  bodyParts.push(`Total: ${invoice.total.toLocaleString()} ${invoice.currency}.`);
+  if (invoice.due_at) {
+    bodyParts.push(`Due by ${invoice.due_at}.`);
+  }
+
+  await safeNotifyUser({
+    userId: invoice.user_id,
+    title: 'Charging invoice issued',
+    body: bodyParts.join(' '),
+    type: 'invoice',
+    data: {
+      invoiceId: invoice.id,
+      sessionId: invoice.session_id,
+      total: invoice.total,
+      currency: invoice.currency,
+      dueAt: invoice.due_at,
+      paymentStatus: invoice.payment_status,
     },
   });
 };
@@ -270,22 +350,12 @@ const resolveConfiguredChargeDurationMinutes = () => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
-const computeChargeDurationMinutes = (
-  socStart,
-  socTarget,
-  batteryKwh,
-  connectorPowerKw
-) => {
+const computeChargeDurationMinutes = (socStart, socTarget, batteryKwh, connectorPowerKw) => {
   const configured = resolveConfiguredChargeDurationMinutes();
   const maxMinutes = BOOKING_SLOT_MINUTES;
   if (configured) return Math.min(maxMinutes, Math.round(configured));
   if (batteryKwh && connectorPowerKw) {
-    const calculated = calculateChargeDurationFromSoc(
-      socStart,
-      socTarget || 100,
-      batteryKwh,
-      connectorPowerKw
-    );
+    const calculated = calculateChargeDurationFromSoc(socStart, socTarget || 100, batteryKwh, connectorPowerKw);
     return Math.min(maxMinutes, Math.round(calculated));
   }
   return maxMinutes;
@@ -303,78 +373,79 @@ const computeChargeDurationMinutes = (
  */
 exports.startImmediateCharge = asyncHandler(async (req, res) => {
   const { bookingId, paymentMethod: rawPaymentMethod } = req.body;
-  if (!bookingId) throw new HttpError(400, "bookingId is required");
+  if (!bookingId) throw new HttpError(400, 'bookingId is required');
 
   const operator = ensureRequestUser(req);
   const operatorRole = operator?.role || ROLES.DRIVER;
   const operatorId = ensureRequestUserId(req);
 
-  const bookingQueryOptions =
-    operatorRole === ROLES.DRIVER ? {} : { ignoreUser: true };
+  const bookingQueryOptions = operatorRole === ROLES.DRIVER ? {} : { ignoreUser: true };
   const bookingUserConstraint = operatorRole === ROLES.DRIVER ? operatorId : null;
 
   const booking = await Booking.findOne(
     buildBookingQuery(bookingUserConstraint, bookingId, bookingQueryOptions)
   );
-  if (!booking) throw new HttpError(404, "Booking not found");
+  if (!booking) throw new HttpError(404, 'Booking not found');
   if (booking.status !== BOOKING_STATUS.RESERVED) {
-    throw new HttpError(409, "Booking is not ready for check-in");
+    throw new HttpError(409, 'Booking is not ready for check-in');
   }
 
   // Driver không được start booking của người khác
   if (operatorRole === ROLES.DRIVER && booking.userId !== operatorId) {
-    throw new HttpError(403, "You are not allowed to start this booking");
+    throw new HttpError(403, 'You are not allowed to start this booking');
   }
 
   const now = new Date();
   if (now > new Date(booking.checkInDeadline)) {
-    throw new HttpError(409, "Booking check-in window has expired");
+    throw new HttpError(409, 'Booking check-in window has expired');
   }
 
   if (await Session.findOne({ bookingId: booking._id })) {
-    throw new HttpError(409, "Session already exists for this booking");
+    throw new HttpError(409, 'Session already exists for this booking');
   }
 
   const targetUserId = booking.userId;
-  const paymentMethod = normalizePaymentMethod(rawPaymentMethod, operatorRole);
+
+  const membershipDetails = await resolveUserMembership(targetUserId);
+
+  const paymentMethod = normalizePaymentMethod(
+    rawPaymentMethod || booking.paymentMethod,
+    operatorRole
+  );
+
+  const minBalanceRequired =
+    paymentMethod === PAYMENT_METHODS.WALLET
+      ? computeMinBalanceRequirement(SESSION_MIN_BALANCE_BASE_VND, membershipDetails.mods)
+      : 0;
 
   // Chỉ kiểm tra ví nếu thanh toán bằng ví
   if (paymentMethod === PAYMENT_METHODS.WALLET) {
     const wallet = await Wallet.findOne({ user_id: targetUserId });
-    if (!wallet || wallet.balance < SESSION_MIN_BALANCE_BASE_VND) {
-      throw new HttpError(
-        402,
-        `Minimum balance of ${SESSION_MIN_BALANCE_BASE_VND.toLocaleString()} VND is required`
-      );
+    if (!wallet || wallet.balance < minBalanceRequired) {
+      throw new HttpError(402, `Minimum balance of ${minBalanceRequired.toLocaleString()} VND is required`);
     }
   }
 
   const connector = await Connector.findOneAndUpdate(
-    { _id: booking.connectorId, status: "RESERVED" },
-    { status: "CHARGING" },
+    { _id: booking.connectorId, status: 'RESERVED' },
+    { status: 'CHARGING' },
     { new: true }
   );
-  if (!connector) throw new HttpError(409, "Connector is no longer reserved");
+  if (!connector) throw new HttpError(409, 'Connector is no longer reserved');
 
   cancelNoShowJob(booking._id);
 
-  let batteryKwh =
-    booking.vehicle?.batteryKwh > 0 ? booking.vehicle.batteryKwh : null;
+  let batteryKwh = booking.vehicle?.batteryKwh > 0 ? booking.vehicle.batteryKwh : null;
   if (!batteryKwh && booking.vehicleId) {
     const vehicle = await Vehicle.findOne({ id: booking.vehicleId, userId: targetUserId })
-      .select("batteryKwh")
+      .select('batteryKwh')
       .lean();
     if (vehicle?.batteryKwh > 0) batteryKwh = vehicle.batteryKwh;
   }
 
   const connectorPowerKw = connector.powerKw > 0 ? connector.powerKw : null;
   const socStart = randomIntInclusive(SESSION_SOC_RANDOM_MIN, SESSION_SOC_RANDOM_MAX);
-  const chargeDurationMinutes = computeChargeDurationMinutes(
-    socStart,
-    100,
-    batteryKwh,
-    connectorPowerKw
-  );
+  const chargeDurationMinutes = computeChargeDurationMinutes(socStart, 100, batteryKwh, connectorPowerKw);
 
   const startedAt = now;
   const slotEnd = new Date(booking.slotEnd);
@@ -383,33 +454,42 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
   const expectedFullAt = new Date(startedAt.getTime() + finalDuration * 60 * 1000);
 
   const chargePercentageIn30Min =
-    batteryKwh && connectorPowerKw
-      ? calculateChargePercentageIn30Min(socStart, batteryKwh, connectorPowerKw)
-      : 0;
+    batteryKwh && connectorPowerKw ? calculateChargePercentageIn30Min(socStart, batteryKwh, connectorPowerKw) : 0;
   const timeToFullChargeMinutes =
-    batteryKwh && connectorPowerKw
-      ? calculateTimeToFullCharge(socStart, batteryKwh, connectorPowerKw)
-      : null;
+    batteryKwh && connectorPowerKw ? calculateTimeToFullCharge(socStart, batteryKwh, connectorPowerKw) : null;
   const energyRemainingKwh = batteryKwh ? ((100 - socStart) / 100) * batteryKwh : 0;
 
-  const tariff = await Tariff.findEffectiveAt(
-    booking.stationId,
-    connector.type,
-    startedAt
-  );
-  const pricingSnapshot = tariff
-    ? {
-        tariffId: tariff._id,
-        mode: tariff.mode,
-        connectorType: tariff.connectorType,
-        pricePerMin: toNumber(tariff.pricePerMin, 0),
-        idleFeePerMin: toNumber(tariff.idleFeePerMin, 0),
-        pricePerKwh: toNumber(tariff.pricePerKwh, 0),
-        graceMin: toNumber(tariff.graceMin, 0),
-        currency: "VND",
-        effectiveFrom: tariff.effectiveFrom,
-      }
-    : { currency: "VND" };
+  const tariff = await Tariff.findEffectiveAt(booking.stationId, connector.type, startedAt);
+
+  const baseRates = {
+    pricePerMin: tariff ? toNumber(tariff.pricePerMin, 0) : 0,
+    idleFeePerMin: tariff ? toNumber(tariff.idleFeePerMin, 0) : 0,
+    pricePerKwh: tariff ? toNumber(tariff.pricePerKwh, 0) : 0,
+    graceMin: tariff ? toNumber(tariff.graceMin, 0) : 0,
+  };
+
+  const pricingWithMembership = applyMembershipPricing(baseRates, membershipDetails.mods);
+
+  const pricingSnapshot = {
+    currency: 'VND',
+    tariffId: tariff?._id,
+    mode: tariff?.mode,
+    connectorType: tariff?.connectorType,
+    pricePerMin: pricingWithMembership.pricePerMin,
+    idleFeePerMin: pricingWithMembership.idleFeePerMin,
+    pricePerKwh: pricingWithMembership.pricePerKwh,
+    graceMin: pricingWithMembership.graceMin,
+    effectiveFrom: tariff?.effectiveFrom,
+    baseRates: pricingWithMembership.baseRates,
+    membership: membershipDetails.plan
+      ? {
+          planCode: membershipDetails.plan.code,
+          planName: membershipDetails.plan.name,
+          renewAt: membershipDetails.membership?.renewAt || null,
+          applied: pricingWithMembership.applied,
+        }
+      : null,
+  };
 
   const session = await Session.create({
     bookingId: booking._id,
@@ -428,7 +508,7 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
     slotEnd,
     chargeDurationMinutes: finalDuration,
     idleFeeIntervalMinutes: SESSION_IDLE_FEE_INTERVAL_MINUTES,
-    minBalanceRequired: paymentMethod === PAYMENT_METHODS.WALLET ? SESSION_MIN_BALANCE_BASE_VND : 0,
+    minBalanceRequired,
     pricing: pricingSnapshot,
     billing: { currency: pricingSnapshot.currency },
     chargingPredictions: {
@@ -437,10 +517,13 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
       energyChargedKwh: 0,
       energyRemainingKwh,
     },
+    walkInInfo: booking.walkInInfo || undefined,
   });
 
   const payload = baseSessionPayload(session);
   startSessionBroadcast(payload, { batteryKwh, connectorPowerKw });
+
+  await notifySessionStarted(payload, booking);
 
   booking.status = BOOKING_STATUS.CHECKED_IN;
   await booking.save();
@@ -448,14 +531,14 @@ exports.startImmediateCharge = asyncHandler(async (req, res) => {
 
   const notices = [];
   if (expectedFullAt < slotEnd) {
-    notices.push("Battery expected to reach 100% before slot ends. Please vacate to avoid idle fees.");
+    notices.push('Battery expected to reach 100% before slot ends. Please vacate to avoid idle fees.');
   }
   if (paymentMethod === PAYMENT_METHODS.ONSITE) {
-    notices.push("Onsite payment is required for this session.");
+    notices.push('Onsite payment is required for this session.');
   }
 
   res.status(201).json({
-    message: "Charging session started",
+    message: 'Charging session started',
     session: payload,
     payment: { method: paymentMethod },
     notices,
@@ -478,18 +561,16 @@ exports.stopSession = asyncHandler(async (req, res) => {
   const sessionQueryOptions = actorRole === ROLES.DRIVER ? {} : { ignoreUser: true };
   const sessionUserConstraint = actorRole === ROLES.DRIVER ? actorId : null;
 
-  const session = await Session.findOne(
-    buildSessionQuery(sessionUserConstraint, id, sessionQueryOptions)
-  );
-  if (!session) throw new HttpError(404, "Session not found");
+  const session = await Session.findOne(buildSessionQuery(sessionUserConstraint, id, sessionQueryOptions));
+  if (!session) throw new HttpError(404, 'Session not found');
 
   if (![SESSION_STATUS.CHARGING, SESSION_STATUS.COMPLETED].includes(session.status)) {
-    throw new HttpError(409, "Session cannot be stopped in its current state");
+    throw new HttpError(409, 'Session cannot be stopped in its current state');
   }
 
   const now = new Date();
   const finalized = await completeSession(session, { stoppedAt: now });
-  if (!finalized) throw new HttpError(500, "Failed to finalize session");
+  if (!finalized) throw new HttpError(500, 'Failed to finalize session');
 
   await Session.updateOne({ _id: finalized._id }, { $set: { stoppedBy: actorId } });
   finalized.stoppedBy = actorId;
@@ -506,11 +587,11 @@ exports.stopSession = asyncHandler(async (req, res) => {
     }
   }
 
-  await Connector.findByIdAndUpdate(finalized.connectorId, { status: "IDLE" });
+  await Connector.findByIdAndUpdate(finalized.connectorId, { status: 'IDLE' });
 
   const notices = [];
   if (finalized.socEnd >= 100 && now < finalized.slotEnd) {
-    notices.push("Vehicle reached 100%. Please free the connector.");
+    notices.push('Vehicle reached 100%. Please free the connector.');
   }
   if (finalized.idleFeeIntervalsApplied > 0) {
     notices.push(`Idle fees applied for ${finalized.idleFeeIntervalsApplied} interval(s).`);
@@ -518,9 +599,29 @@ exports.stopSession = asyncHandler(async (req, res) => {
 
   await notifySessionStoppedByOperator(finalized, { id: actorId, role: actorRole });
 
+  const settlement = await settleSessionPayment(finalized);
+
+  let invoiceDoc = settlement?.invoice || null;
+  if (!invoiceDoc) {
+    invoiceDoc = await Invoice.findOne({ session_id: finalized.id });
+  }
+
+  const invoicePlain = invoiceDoc ? toPlain(invoiceDoc) : null;
+
+  await notifySessionCompleted(payload, settlement);
+  if (invoicePlain) {
+    await notifyInvoiceIssued(invoicePlain);
+  }
+
+  if (settlement?.status === 'FAILED' && settlement.reason === 'INSUFFICIENT_FUNDS') {
+    notices.push('Wallet settlement failed due to insufficient balance. Please arrange onsite payment or request a top-up.');
+  }
+
   res.json({
-    message: "Charging session stopped",
+    message: 'Charging session stopped',
     session: payload,
+    invoice: invoicePlain ? formatInvoiceDates(invoicePlain) : null,
+    payment: settlement,
     notices,
   });
 });
@@ -530,18 +631,7 @@ exports.stopSession = asyncHandler(async (req, res) => {
  * Query: status, userId, stationId, connectorId, from, to, search, page, limit, sort
  */
 exports.listSessions = asyncHandler(async (req, res) => {
-  const {
-    status,
-    userId,
-    stationId,
-    connectorId,
-    from,
-    to,
-    search,
-    page = 1,
-    limit = 20,
-    sort,
-  } = req.query;
+  const { status, userId, stationId, connectorId, from, to, search, page = 1, limit = 20, sort } = req.query;
 
   const match = {};
   if (status) match.status = { $in: parseStatuses(status) };
@@ -557,14 +647,15 @@ exports.listSessions = asyncHandler(async (req, res) => {
   if (search) {
     const keyword = String(search).trim();
     if (keyword) {
-      const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      const or = [
-        { id: keyword },
-        { bookingRef: keyword },
-        { userId: keyword },
-        { id: { $regex: regex } },
-      ];
-      match.$or ? (match.$and = [match, { $or }]) : (match.$or = or);
+      const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      const or = [{ id: keyword }, { bookingRef: keyword }, { userId: keyword }, { id: { $regex: regex } }];
+      // merge $or safely
+      if (match.$or) {
+        match.$and = [{ $or: match.$or }, { $or: or }];
+        delete match.$or;
+      } else {
+        match.$or = or;
+      }
     }
   }
 
@@ -577,54 +668,54 @@ exports.listSessions = asyncHandler(async (req, res) => {
     { $match: match },
     {
       $facet: {
-        metadata: [{ $count: "total" }],
+        metadata: [{ $count: 'total' }],
         items: [
           { $sort: sortSpec },
           { $skip: skip },
           { $limit: pageSize },
           {
             $lookup: {
-              from: "bookings",
-              localField: "bookingId",
-              foreignField: "_id",
-              as: "booking",
+              from: 'bookings',
+              localField: 'bookingId',
+              foreignField: '_id',
+              as: 'booking',
             },
           },
-          { $unwind: { path: "$booking", preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: '$booking', preserveNullAndEmptyArrays: true } },
           {
             $lookup: {
-              from: "stations",
-              localField: "stationId",
-              foreignField: "_id",
-              as: "station",
+              from: 'stations',
+              localField: 'stationId',
+              foreignField: '_id',
+              as: 'station',
             },
           },
-          { $unwind: { path: "$station", preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: '$station', preserveNullAndEmptyArrays: true } },
           {
             $lookup: {
-              from: "connectors",
-              localField: "connectorId",
-              foreignField: "_id",
-              as: "connector",
+              from: 'connectors',
+              localField: 'connectorId',
+              foreignField: '_id',
+              as: 'connector',
             },
           },
-          { $unwind: { path: "$connector", preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: '$connector', preserveNullAndEmptyArrays: true } },
           {
             $lookup: {
-              from: "users",
-              localField: "userId",
-              foreignField: "id",
-              as: "user",
+              from: 'users',
+              localField: 'userId',
+              foreignField: 'id',
+              as: 'user',
             },
           },
-          { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
         ],
       },
     },
     {
       $project: {
         items: 1,
-        total: { $ifNull: [{ $first: "$metadata.total" }, 0] },
+        total: { $ifNull: [{ $first: '$metadata.total' }, 0] },
       },
     },
   ];
@@ -652,46 +743,46 @@ exports.getSession = asyncHandler(async (req, res) => {
     $or: [{ id: req.params.id }, { _id: toObjectId(req.params.id) }],
   });
 
-  if (!session) throw new HttpError(404, "Session not found");
+  if (!session) throw new HttpError(404, 'Session not found');
 
   const detailed = await Session.aggregate([
     { $match: { _id: session._id } },
     {
       $lookup: {
-        from: "bookings",
-        localField: "bookingId",
-        foreignField: "_id",
-        as: "booking",
+        from: 'bookings',
+        localField: 'bookingId',
+        foreignField: '_id',
+        as: 'booking',
       },
     },
-    { $unwind: { path: "$booking", preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: '$booking', preserveNullAndEmptyArrays: true } },
     {
       $lookup: {
-        from: "stations",
-        localField: "stationId",
-        foreignField: "_id",
-        as: "station",
+        from: 'stations',
+        localField: 'stationId',
+        foreignField: '_id',
+        as: 'station',
       },
     },
-    { $unwind: { path: "$station", preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: '$station', preserveNullAndEmptyArrays: true } },
     {
       $lookup: {
-        from: "connectors",
-        localField: "connectorId",
-        foreignField: "_id",
-        as: "connector",
+        from: 'connectors',
+        localField: 'connectorId',
+        foreignField: '_id',
+        as: 'connector',
       },
     },
-    { $unwind: { path: "$connector", preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: '$connector', preserveNullAndEmptyArrays: true } },
     {
       $lookup: {
-        from: "users",
-        localField: "userId",
-        foreignField: "id",
-        as: "user",
+        from: 'users',
+        localField: 'userId',
+        foreignField: 'id',
+        as: 'user',
       },
     },
-    { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
   ]).then((agg) => (agg[0] ? shapeSession(agg[0]) : null));
 
   res.json({ session: detailed });

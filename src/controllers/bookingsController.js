@@ -1,32 +1,25 @@
 // src/controllers/bookingController.js
-const mongoose = require("mongoose");
+const mongoose = require('mongoose');
 
-const Booking = require("../models/Booking");
-const Connector = require("../models/Connector");
-const Vehicle = require("../models/Vehicle");
-const Station = require("../models/Station");
-const Tariff = require("../models/Tariff");
-const Session = require("../models/Session");
+const Booking = require('../models/Booking');
+const Connector = require('../models/Connector');
+const Vehicle = require('../models/Vehicle');
+const Station = require('../models/Station');
+const Tariff = require('../models/Tariff');
+const Session = require('../models/Session');
+const Invoice = require('../models/Invoice'); // NEW
 
-const asyncHandler = require("../utils/asyncHandler");
-const { HttpError } = require("../utils/errors");
-const { ensureRequestUserId } = require("../utils/requestUser");
-const {
-  BOOKING_SLOT_MINUTES,
-  BOOKING_GRACE_MINUTES,
-} = require("../constants/business");
-const { BOOKING_STATUS, SESSION_STATUS } = require("../constants/enums");
-const {
-  scheduleNoShowJob,
-  cancelNoShowJob,
-} = require("../services/bookingScheduler");
-const bookingMonitor = require("../services/bookingMonitor");
-const {
-  formatBookingDates,
-  formatToVietnamTime,
-} = require("../utils/timezoneHelpers");
-const { completeSessionByReference } = require("../services/sessionFinalizer");
-const { safeNotifyUser } = require("../services/notificationService");
+const asyncHandler = require('../utils/asyncHandler');
+const { HttpError } = require('../utils/errors');
+const { ensureRequestUserId } = require('../utils/requestUser');
+const { BOOKING_SLOT_MINUTES, BOOKING_GRACE_MINUTES } = require('../constants/business');
+const { BOOKING_STATUS, SESSION_STATUS, PAYMENT_METHODS } = require('../constants/enums'); // NEW PAYMENT_METHODS
+const { scheduleNoShowJob, cancelNoShowJob } = require('../services/bookingScheduler');
+const bookingMonitor = require('../services/bookingMonitor');
+const { formatBookingDates, formatToVietnamTime, formatInvoiceDates } = require('../utils/timezoneHelpers'); // NEW formatInvoiceDates
+const { completeSessionByReference } = require('../services/sessionFinalizer');
+const { safeNotifyUser } = require('../services/notificationService');
+const { settleSessionPayment } = require('../services/sessionPaymentSettlement'); // NEW
 
 // ========== Utils ==========
 const toMinutes = (ms) => ms / (60 * 1000);
@@ -62,7 +55,7 @@ const STATUS_SET = new Set(Object.values(BOOKING_STATUS));
 const parseStatuses = (raw) => {
   if (!raw) return [];
   return String(raw)
-    .split(",")
+    .split(',')
     .map((t) => t.trim().toUpperCase())
     .filter((t) => STATUS_SET.has(t));
 };
@@ -71,20 +64,20 @@ const parseSort = (raw) => {
   const defaultSort = { slotStart: -1 };
   if (!raw) return defaultSort;
 
-  const allowed = new Set(["slotStart", "slotEnd", "createdAt", "updatedAt"]);
+  const allowed = new Set(['slotStart', 'slotEnd', 'createdAt', 'updatedAt']);
   const sortSpec = {};
 
   String(raw)
-    .split(",")
+    .split(',')
     .map((item) => item.trim())
     .filter(Boolean)
     .forEach((field) => {
       let name = field;
       let direction = 1;
-      if (field.startsWith("-")) {
+      if (field.startsWith('-')) {
         direction = -1;
         name = field.slice(1);
-      } else if (field.startsWith("+")) {
+      } else if (field.startsWith('+')) {
         name = field.slice(1);
       }
       if (allowed.has(name)) {
@@ -148,6 +141,11 @@ const shapeBooking = (doc) => {
   if (booking.stationId) booking.stationId = booking.stationId.toString();
   if (booking.connectorId) booking.connectorId = booking.connectorId.toString();
 
+  // NEW defaults from patch
+  booking.paymentMethod = booking.paymentMethod || PAYMENT_METHODS.WALLET;
+  booking.createdByStaffId = booking.createdByStaffId || null;
+  booking.walkInInfo = booking.walkInInfo || null;
+
   return booking;
 };
 
@@ -158,7 +156,7 @@ const notifyBookingStatusChange = async (booking, status) => {
     userId: booking.userId,
     title: `Booking ${status.toLowerCase()}`,
     body: `Your booking ${booking.id || booking._id?.toString?.()} is now ${status}.`,
-    type: "booking",
+    type: 'booking',
     data: {
       bookingId: booking.id,
       status,
@@ -185,40 +183,40 @@ const populateBookingDetails = async (booking) => {
     { $match: { _id: booking._id } },
     {
       $lookup: {
-        from: "stations",
-        localField: "stationId",
-        foreignField: "_id",
-        as: "station",
+        from: 'stations',
+        localField: 'stationId',
+        foreignField: '_id',
+        as: 'station',
       },
     },
-    { $unwind: { path: "$station", preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: '$station', preserveNullAndEmptyArrays: true } },
     {
       $lookup: {
-        from: "connectors",
-        localField: "connectorId",
-        foreignField: "_id",
-        as: "connector",
+        from: 'connectors',
+        localField: 'connectorId',
+        foreignField: '_id',
+        as: 'connector',
       },
     },
-    { $unwind: { path: "$connector", preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: '$connector', preserveNullAndEmptyArrays: true } },
     {
       $lookup: {
-        from: "users",
-        localField: "userId",
-        foreignField: "id",
-        as: "user",
+        from: 'users',
+        localField: 'userId',
+        foreignField: 'id',
+        as: 'user',
       },
     },
-    { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
     {
       $lookup: {
-        from: "sessions",
-        localField: "_id",
-        foreignField: "bookingId",
-        as: "session",
+        from: 'sessions',
+        localField: '_id',
+        foreignField: 'bookingId',
+        as: 'session',
       },
     },
-    { $unwind: { path: "$session", preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: '$session', preserveNullAndEmptyArrays: true } },
   ]);
 
   return result ? shapeBooking(result) : null;
@@ -230,33 +228,27 @@ const populateBookingDetails = async (booking) => {
 exports.createBooking = asyncHandler(async (req, res) => {
   const { connectorId, slotStart, vehicleId } = req.body;
   if (!connectorId || !slotStart) {
-    throw new HttpError(400, "connectorId and slotStart are required");
+    throw new HttpError(400, 'connectorId and slotStart are required');
   }
 
   // Không cho client tự đính kèm snapshot xe — server sẽ tự lấy từ xe mặc định
   if (req.body.vehicle) {
-    throw new HttpError(
-      400,
-      "Do not send vehicle details; the server uses your default vehicle."
-    );
+    throw new HttpError(400, 'Do not send vehicle details; the server uses your default vehicle.');
   }
 
   const userId = ensureRequestUserId(req);
 
   const start = new Date(slotStart);
   if (Number.isNaN(start.getTime())) {
-    throw new HttpError(400, "Invalid slotStart value");
+    throw new HttpError(400, 'Invalid slotStart value');
   }
 
   const normalizedStart = new Date(start);
   normalizedStart.setSeconds(0, 0);
 
   const now = new Date();
-  if (
-    normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60000 <=
-    now.getTime()
-  ) {
-    throw new HttpError(400, "Slot must be in the future");
+  if (normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60000 <= now.getTime()) {
+    throw new HttpError(400, 'Slot must be in the future');
   }
 
   // Bắt buộc phải có xe mặc định
@@ -269,16 +261,13 @@ exports.createBooking = asyncHandler(async (req, res) => {
   if (!defaultVehicle) {
     throw new HttpError(
       409,
-      "DEFAULT_VEHICLE_REQUIRED: You must register a vehicle and set a default vehicle before booking."
+      'DEFAULT_VEHICLE_REQUIRED: You must register a vehicle and set a default vehicle before booking.'
     );
   }
 
   // Nếu gửi vehicleId thì bắt buộc phải là xe mặc định
   if (vehicleId && vehicleId !== defaultVehicle.id) {
-    throw new HttpError(
-      400,
-      "MUST_USE_DEFAULT_VEHICLE: You can only book with your default vehicle."
-    );
+    throw new HttpError(400, 'MUST_USE_DEFAULT_VEHICLE: You can only book with your default vehicle.');
   }
 
   // Kiểm tra user có booking đang active không (trừ slot liên tiếp)
@@ -290,25 +279,20 @@ exports.createBooking = asyncHandler(async (req, res) => {
   if (userActiveBookings.length > 0) {
     // Cho phép slot liên tiếp (cách nhau tối đa 5 phút)
     const isConsecutiveSlot = userActiveBookings.some((b) => {
-      const diff = Math.abs(
-        normalizedStart.getTime() - new Date(b.slotEnd).getTime()
-      );
+      const diff = Math.abs(normalizedStart.getTime() - new Date(b.slotEnd).getTime());
       return diff <= 5 * 60 * 1000;
     });
 
     if (!isConsecutiveSlot) {
       throw new HttpError(
         409,
-        "You already have an active booking. Only consecutive slots are allowed."
+        'You already have an active booking. Only consecutive slots are allowed.'
       );
     }
 
     // Không quá 2 slot liên tiếp
     if (userActiveBookings.length >= 2) {
-      throw new HttpError(
-        409,
-        "You can only book maximum 2 consecutive slots."
-      );
+      throw new HttpError(409, 'You can only book maximum 2 consecutive slots.');
     }
   }
 
@@ -325,18 +309,11 @@ exports.createBooking = asyncHandler(async (req, res) => {
   });
 
   if (todayBookings >= 3) {
-    throw new HttpError(
-      429,
-      "Daily limit reached. You can only book 3 slots per day."
-    );
+    throw new HttpError(429, 'Daily limit reached. You can only book 3 slots per day.');
   }
 
-  const slotEnd = new Date(
-    normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60 * 1000
-  );
-  const checkInDeadline = new Date(
-    normalizedStart.getTime() + BOOKING_GRACE_MINUTES * 60 * 1000
-  );
+  const slotEnd = new Date(normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60 * 1000);
+  const checkInDeadline = new Date(normalizedStart.getTime() + BOOKING_GRACE_MINUTES * 60 * 1000);
 
   // Chống đặt chồng lấp trên cùng connector
   const overlapping = await Booking.findOne({
@@ -350,10 +327,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
     const overlapMinutes = Math.round(
       toMinutes(
         Math.min(new Date(overlapping.slotEnd).getTime(), slotEnd.getTime()) -
-          Math.max(
-            new Date(overlapping.slotStart).getTime(),
-            normalizedStart.getTime()
-          )
+          Math.max(new Date(overlapping.slotStart).getTime(), normalizedStart.getTime())
       )
     );
     throw new HttpError(
@@ -368,13 +342,13 @@ exports.createBooking = asyncHandler(async (req, res) => {
   try {
     // Reserve connector nếu đang IDLE
     connectorDoc = await Connector.findOneAndUpdate(
-      { _id: connectorId, status: "IDLE" },
-      { $set: { status: "RESERVED" } },
+      { _id: connectorId, status: 'IDLE' },
+      { $set: { status: 'RESERVED' } },
       { new: true }
     );
 
     if (!connectorDoc) {
-      throw new HttpError(409, "Connector is not available for booking");
+      throw new HttpError(409, 'Connector is not available for booking');
     }
 
     const booking = await Booking.create({
@@ -387,20 +361,39 @@ exports.createBooking = asyncHandler(async (req, res) => {
       status: BOOKING_STATUS.RESERVED,
       vehicleId: defaultVehicle.id,
       vehicle: vehicleSnapshot,
+      paymentMethod: PAYMENT_METHODS.WALLET, // NEW default
     });
 
     scheduleNoShowJob(booking);
     bookingMonitor.syncBooking(booking);
 
+    // NEW: notify user on creation
+    await safeNotifyUser({
+      userId,
+      title: 'Booking confirmed',
+      body: `Your booking ${booking.id} is reserved for ${formatToVietnamTime(
+        booking.slotStart
+      )}. Please check in before ${formatToVietnamTime(checkInDeadline)}.`,
+      type: 'booking',
+      data: {
+        bookingId: booking.id,
+        status: booking.status,
+        slotStart: formatToVietnamTime(booking.slotStart),
+        slotEnd: formatToVietnamTime(booking.slotEnd),
+        stationId: booking.stationId?.toString?.() || connectorDoc.stationId?.toString?.(),
+        connectorId: connectorDoc._id?.toString(),
+      },
+    });
+
     res.status(201).json({
-      message: "Booking created successfully",
+      message: 'Booking created successfully',
       booking: formatBookingDates(booking),
     });
   } catch (err) {
     // rollback trạng thái connector nếu lỗi
     if (connectorDoc) {
       await Connector.findByIdAndUpdate(connectorDoc._id, {
-        $set: { status: "IDLE" },
+        $set: { status: 'IDLE' },
       });
     }
     throw err;
@@ -410,9 +403,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
 // GET /api/v1/bookings/my
 exports.getMyBookings = asyncHandler(async (req, res) => {
   const userId = ensureRequestUserId(req);
-  const bookings = await Booking.find({ userId })
-    .sort({ slotStart: -1 })
-    .lean();
+  const bookings = await Booking.find({ userId }).sort({ slotStart: -1 }).lean();
 
   res.json({
     bookings: bookings.map(formatBookingDates),
@@ -430,9 +421,9 @@ exports.cancelBooking = asyncHandler(async (req, res) => {
   }
 
   const booking = await Booking.findOne(query);
-  if (!booking) throw new HttpError(404, "Booking not found");
+  if (!booking) throw new HttpError(404, 'Booking not found');
   if (booking.status !== BOOKING_STATUS.RESERVED) {
-    throw new HttpError(409, "Only reserved bookings can be cancelled");
+    throw new HttpError(409, 'Only reserved bookings can be cancelled');
   }
 
   booking.status = BOOKING_STATUS.CANCELLED;
@@ -441,31 +432,26 @@ exports.cancelBooking = asyncHandler(async (req, res) => {
   cancelNoShowJob(booking._id);
 
   await Connector.findOneAndUpdate(
-    { _id: booking.connectorId, status: "RESERVED" },
-    { $set: { status: "IDLE" } }
+    { _id: booking.connectorId, status: 'RESERVED' },
+    { $set: { status: 'IDLE' } }
   );
 
   res.json({
-    message: "Booking cancelled successfully",
+    message: 'Booking cancelled successfully',
     booking: formatBookingDates(booking),
   });
 });
 
 // GET /api/v1/bookings/available-slots
 exports.getAvailableSlots = asyncHandler(async (req, res) => {
-  const {
-    stationId,
-    date,
-    connectorType,
-    duration = BOOKING_SLOT_MINUTES,
-  } = req.query;
+  const { stationId, date, connectorType, duration = BOOKING_SLOT_MINUTES } = req.query;
 
-  if (!stationId) throw new HttpError(400, "stationId is required");
+  if (!stationId) throw new HttpError(400, 'stationId is required');
 
   // Parse date (default to today)
   const targetDate = date ? new Date(date) : new Date();
   if (Number.isNaN(targetDate.getTime())) {
-    throw new HttpError(400, "Invalid date format");
+    throw new HttpError(400, 'Invalid date format');
   }
 
   // Time range trong ngày
@@ -475,18 +461,18 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
   endOfDay.setHours(23, 59, 59, 999);
 
   // Lọc connector theo station + trạng thái IDLE (+ loại nếu có)
-  const connectorFilter = { stationId, status: "IDLE" };
+  const connectorFilter = { stationId, status: 'IDLE' };
   if (connectorType) connectorFilter.type = connectorType;
 
   const connectors = await Connector.find(connectorFilter)
-    .populate("stationId", "name lat lng status")
+    .populate('stationId', 'name lat lng status')
     .lean();
 
   if (connectors.length === 0) {
     return res.json({
-      message: "No available connectors found",
+      message: 'No available connectors found',
       availableSlots: [],
-      date: targetDate.toISOString().split("T")[0],
+      date: targetDate.toISOString().split('T')[0],
     });
   }
 
@@ -510,9 +496,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
       if (slotStart < new Date()) continue;
 
       const slotEnd = new Date(slotStart);
-      slotEnd.setMinutes(
-        slotEnd.getMinutes() + Number(duration || BOOKING_SLOT_MINUTES)
-      );
+      slotEnd.setMinutes(slotEnd.getMinutes() + Number(duration || BOOKING_SLOT_MINUTES));
 
       const availableConnectors = [];
 
@@ -526,11 +510,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
         });
 
         if (!hasOverlap) {
-          const tariff = await Tariff.findEffectiveAt(
-            stationId,
-            connector.type,
-            slotStart
-          );
+          const tariff = await Tariff.findEffectiveAt(stationId, connector.type, slotStart);
 
           availableConnectors.push({
             connectorId: connector._id,
@@ -542,7 +522,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
                   pricePerMin: tariff.pricePerMin,
                   pricePerKwh: tariff.pricePerKwh,
                   idleFeePerMin: tariff.idleFeePerMin,
-                  currency: "VND",
+                  currency: 'VND',
                   mode: tariff.mode,
                 }
               : null,
@@ -569,8 +549,8 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
   }
 
   res.json({
-    message: "Available slots retrieved successfully",
-    date: targetDate.toISOString().split("T")[0],
+    message: 'Available slots retrieved successfully',
+    date: targetDate.toISOString().split('T')[0],
     totalSlots: slots.length,
     availableSlots: slots,
   });
@@ -578,18 +558,8 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
 
 // GET /api/v1/bookings (admin/operator listing + search)
 exports.listBookings = asyncHandler(async (req, res) => {
-  const {
-    status,
-    userId,
-    stationId,
-    connectorId,
-    from,
-    to,
-    search,
-    page = 1,
-    limit = 20,
-    sort,
-  } = req.query;
+  const { status, userId, stationId, connectorId, from, to, search, page = 1, limit = 20, sort } =
+    req.query;
 
   const statuses = parseStatuses(status);
   const match = {};
@@ -610,13 +580,13 @@ exports.listBookings = asyncHandler(async (req, res) => {
   if (search) {
     const keyword = String(search).trim();
     if (keyword) {
-      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const regex = new RegExp(escaped, "i");
+      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
       const orConditions = [
         { id: keyword },
         { userId: keyword },
-        { "vehicle.licensePlate": keyword },
-        { "vehicle.licensePlate": { $regex: regex } },
+        { 'vehicle.licensePlate': keyword },
+        { 'vehicle.licensePlate': { $regex: regex } },
       ];
       if (match.$and) {
         match.$and.push({ $or: orConditions });
@@ -638,54 +608,54 @@ exports.listBookings = asyncHandler(async (req, res) => {
     { $match: match },
     {
       $facet: {
-        metadata: [{ $count: "total" }],
+        metadata: [{ $count: 'total' }],
         items: [
           { $sort: sortSpec },
           { $skip: skip },
           { $limit: pageSize },
           {
             $lookup: {
-              from: "stations",
-              localField: "stationId",
-              foreignField: "_id",
-              as: "station",
+              from: 'stations',
+              localField: 'stationId',
+              foreignField: '_id',
+              as: 'station',
             },
           },
-          { $unwind: { path: "$station", preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: '$station', preserveNullAndEmptyArrays: true } },
           {
             $lookup: {
-              from: "connectors",
-              localField: "connectorId",
-              foreignField: "_id",
-              as: "connector",
+              from: 'connectors',
+              localField: 'connectorId',
+              foreignField: '_id',
+              as: 'connector',
             },
           },
-          { $unwind: { path: "$connector", preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: '$connector', preserveNullAndEmptyArrays: true } },
           {
             $lookup: {
-              from: "users",
-              localField: "userId",
-              foreignField: "id",
-              as: "user",
+              from: 'users',
+              localField: 'userId',
+              foreignField: 'id',
+              as: 'user',
             },
           },
-          { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
           {
             $lookup: {
-              from: "sessions",
-              localField: "_id",
-              foreignField: "bookingId",
-              as: "session",
+              from: 'sessions',
+              localField: '_id',
+              foreignField: 'bookingId',
+              as: 'session',
             },
           },
-          { $unwind: { path: "$session", preserveNullAndEmptyArrays: true } },
+          { $unwind: { path: '$session', preserveNullAndEmptyArrays: true } },
         ],
       },
     },
     {
       $project: {
         items: 1,
-        total: { $ifNull: [{ $first: "$metadata.total" }, 0] },
+        total: { $ifNull: [{ $first: '$metadata.total' }, 0] },
       },
     },
   ];
@@ -708,7 +678,7 @@ exports.listBookings = asyncHandler(async (req, res) => {
 // GET /api/v1/bookings/:id
 exports.getBooking = asyncHandler(async (req, res) => {
   const booking = await findBookingByParam(req.params.id);
-  if (!booking) throw new HttpError(404, "Booking not found");
+  if (!booking) throw new HttpError(404, 'Booking not found');
 
   const detailed = await populateBookingDetails(booking);
   res.json({ booking: detailed });
@@ -717,36 +687,29 @@ exports.getBooking = asyncHandler(async (req, res) => {
 // PATCH /api/v1/bookings/:id/status
 exports.updateBookingStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
-  if (!status) throw new HttpError(400, "status is required");
+  if (!status) throw new HttpError(400, 'status is required');
 
   const normalizedStatus = String(status).toUpperCase();
   if (!STATUS_SET.has(normalizedStatus)) {
-    throw new HttpError(400, "Unsupported booking status");
+    throw new HttpError(400, 'Unsupported booking status');
   }
 
   const booking = await findBookingByParam(req.params.id);
-  if (!booking) throw new HttpError(404, "Booking not found");
+  if (!booking) throw new HttpError(404, 'Booking not found');
 
   if (booking.status === normalizedStatus) {
     const detailed = await populateBookingDetails(booking);
     return res.json({
-      message: "Booking already in requested status",
+      message: 'Booking already in requested status',
       booking: detailed,
     });
   }
 
   // Chỉ cho phép CANCELLED, NO_SHOW, COMPLETED ở endpoint này
-  if (
-    [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.NO_SHOW].includes(
-      normalizedStatus
-    )
-  ) {
+  if ([BOOKING_STATUS.CANCELLED, BOOKING_STATUS.NO_SHOW].includes(normalizedStatus)) {
     const allowed = [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN];
     if (!allowed.includes(booking.status)) {
-      throw new HttpError(
-        409,
-        `Cannot transition from ${booking.status} to ${normalizedStatus}`
-      );
+      throw new HttpError(409, `Cannot transition from ${booking.status} to ${normalizedStatus}`);
     }
 
     // Không được hủy/noshow khi còn session active
@@ -755,10 +718,7 @@ exports.updateBookingStatus = asyncHandler(async (req, res) => {
       status: { $in: [SESSION_STATUS.PENDING, SESSION_STATUS.CHARGING] },
     });
     if (activeSession) {
-      throw new HttpError(
-        409,
-        "Booking has an active session. Stop the charging session first."
-      );
+      throw new HttpError(409, 'Booking has an active session. Stop the charging session first.');
     }
 
     booking.status = normalizedStatus;
@@ -767,8 +727,8 @@ exports.updateBookingStatus = asyncHandler(async (req, res) => {
     cancelNoShowJob(booking._id);
 
     await Connector.findOneAndUpdate(
-      { _id: booking.connectorId, status: { $in: ["RESERVED", "FINISHED"] } },
-      { $set: { status: "IDLE" } }
+      { _id: booking.connectorId, status: { $in: ['RESERVED', 'FINISHED'] } },
+      { $set: { status: 'IDLE' } }
     );
 
     await notifyBookingStatusChange(booking, normalizedStatus);
@@ -786,21 +746,93 @@ exports.updateBookingStatus = asyncHandler(async (req, res) => {
     if (!finalizedSession) {
       throw new HttpError(
         409,
-        "Unable to mark booking as completed because no session was found."
+        'Unable to mark booking as completed because no session was found.'
       );
     }
 
     const refreshed = await Booking.findById(booking._id);
     await notifyBookingStatusChange(refreshed, BOOKING_STATUS.COMPLETED);
+
+    // NEW: settle payment & fetch invoice
+    const settlement = await settleSessionPayment(finalizedSession);
+
+    let invoiceDoc = settlement?.invoice || null;
+    if (!invoiceDoc) {
+      invoiceDoc = await Invoice.findOne({ session_id: finalizedSession.id });
+    }
+
+    const invoicePlain =
+      invoiceDoc && typeof invoiceDoc.toObject === 'function' ? invoiceDoc.toObject() : invoiceDoc;
+
+    // NEW: notify user about session completion + amount/insufficient funds
+    const stoppedAtHuman =
+      formatToVietnamTime(finalizedSession.stoppedAt) || formatToVietnamTime(new Date());
+    const totalAmount = Number(finalizedSession.billing?.totalAmount || 0);
+
+    if (finalizedSession.userId) {
+      const bodyParts = [
+        `Your charging session ${finalizedSession.id} completed at ${stoppedAtHuman}.`,
+      ];
+      if (totalAmount > 0) {
+        bodyParts.push(`Total due: ${totalAmount.toLocaleString()} VND.`);
+      }
+      if (settlement?.status === 'FAILED' && settlement.reason === 'INSUFFICIENT_FUNDS') {
+        bodyParts.push('Wallet balance was insufficient. Please top up or arrange onsite payment.');
+      }
+
+      await safeNotifyUser({
+        userId: finalizedSession.userId,
+        title: 'Charging session completed',
+        body: bodyParts.join(' '),
+        type: 'session',
+        data: {
+          sessionId: finalizedSession.id,
+          bookingId: booking.id,
+          stoppedAt: stoppedAtHuman,
+          totalAmount,
+          status: finalizedSession.status,
+        },
+      });
+    }
+
+    // NEW: notify invoice issuance (if any)
+    if (invoicePlain?.user_id) {
+      const invoiceDue = formatToVietnamTime(invoicePlain.due_at);
+      const invoiceParts = [
+        `Invoice ${invoicePlain.id} has been issued for session ${invoicePlain.session_id}.`,
+        `Total: ${invoicePlain.total.toLocaleString()} ${invoicePlain.currency}.`,
+      ];
+      if (invoiceDue) {
+        invoiceParts.push(`Due by ${invoiceDue}.`);
+      }
+
+      await safeNotifyUser({
+        userId: invoicePlain.user_id,
+        title: 'Charging invoice issued',
+        body: invoiceParts.join(' '),
+        type: 'invoice',
+        data: {
+          invoiceId: invoicePlain.id,
+          sessionId: invoicePlain.session_id,
+          total: invoicePlain.total,
+          currency: invoicePlain.currency,
+          dueAt: invoiceDue,
+          paymentStatus: invoicePlain.payment_status,
+        },
+      });
+    }
+
     const detailed = await populateBookingDetails(refreshed);
     return res.json({
-      message: "Booking marked as completed",
+      message: 'Booking marked as completed',
       booking: detailed,
+      invoice: invoicePlain ? formatInvoiceDates(invoicePlain) : null,
+      settlement,
     });
   }
 
   throw new HttpError(
     400,
-    "Only CANCELLED, NO_SHOW or COMPLETED transitions are supported via this endpoint"
+    'Only CANCELLED, NO_SHOW or COMPLETED transitions are supported via this endpoint'
   );
 });

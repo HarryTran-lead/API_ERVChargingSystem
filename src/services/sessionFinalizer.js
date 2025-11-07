@@ -200,6 +200,20 @@ async function completeSession(session, options = {}) {
     currency,
     breakdown,
   };
+  if (session.pricing?.membership) {
+    session.billing.membership = {
+      planCode: session.pricing.membership.planCode || null,
+      planName: session.pricing.membership.planName || null,
+      renewAt: session.pricing.membership.renewAt || null,
+      applied: session.pricing.membership.applied || {
+        pricePerMinPctOff: 0,
+        pricePerKwhPctOff: 0,
+        idleFeePerMinPctOff: 0,
+        graceMinBonus: 0,
+        minBalancePctOff: 0,
+      },
+    };
+  }
   await session.save();
 
   if (session.connectorId) {
@@ -239,6 +253,13 @@ async function completeSession(session, options = {}) {
         meta: {
           stationId: session.stationId,
           connectorId: session.connectorId,
+          membership: session.pricing?.membership || null,
+          billing: {
+            chargingAmount,
+            idleAmount,
+            totalAmount: total,
+            currency,
+          },
         },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }

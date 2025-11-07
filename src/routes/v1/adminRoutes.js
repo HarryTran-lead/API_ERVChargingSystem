@@ -25,5 +25,5 @@ router.use('/vehicles',        asMiddleware(require('./admin/vehicles'),        
 router.use('/invoices',        asMiddleware(require('./admin/invoices'),        'admin/invoices'));
 router.use('/membership-plans',asMiddleware(require('./adminMembershipPlans'), './adminMembershipPlans'));   // đổi path nếu file bạn khác
 router.use('/wallet',          asMiddleware(require('./walletAdminRoutes'),          './walletAdminRoutes'));            // đổi path nếu file bạn khác
-
+router.use('/incidents',       asMiddleware(require('./admin/incidents'),       'admin/incidents'));
 module.exports = router;
