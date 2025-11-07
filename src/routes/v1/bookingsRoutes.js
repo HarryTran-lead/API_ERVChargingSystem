@@ -22,4 +22,9 @@ router.patch("/:id/status", controller.updateBookingStatus); // PATCH /api/v1/ad
 // 4) Cuối cùng mới là đọc theo id; dùng regex để tránh nuốt path tĩnh
 router.get("/:id", controller.getBooking); // GET /api/v1/admin/bookings/:id
 
+router.post("/", controller.createBooking);
+router.get("/me", controller.getMyBookings);
+router.get("/available-slots", controller.getAvailableSlots);
+router.delete("/:id", controller.cancelBooking);
+
 module.exports = router;

@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@babel/runtime": "^7.22.10",
+    "@google/generative-ai": "^0.24.1",
     "@payos/node": "^2.0.3",
     "axios": "^1.12.2",
     "bcryptjs": "^3.0.2",
@@ -25,6 +26,7 @@
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.2",
+    "node-cron": "^4.2.1",
     "qs": "^6.14.0",
     "socket.io": "^4.8.1",
     "uuid": "^13.0.0"
