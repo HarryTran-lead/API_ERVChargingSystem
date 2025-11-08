@@ -299,6 +299,7 @@ const formatOperationalBooking = (doc) => {
     slotEnd: booking.slotEnd,
     userId: booking.userId,
     paymentMethod: booking.paymentMethod || PAYMENT_METHODS.WALLET,
+    isPaid: Boolean(booking.isPaid),
     createdByStaffId: booking.createdByStaffId || null,
     walkInInfo: booking.walkInInfo || null,
     vehicle: booking.vehicle || null,
@@ -352,7 +353,8 @@ const formatOperationalSession = (doc) => {
 
   return {
     id: session.id,
-    bookingRef: session.bookingRef || booking?.id || booking?._id?.toString() || null,
+    bookingRef:
+      session.bookingRef || booking?.id || booking?._id?.toString() || null,
     status: session.status,
     paymentMethod: session.paymentMethod,
     startedAt: session.startedAt,
@@ -386,6 +388,7 @@ const formatOperationalSession = (doc) => {
           slotEnd: booking.slotEnd,
           userId: booking.userId,
           paymentMethod: booking.paymentMethod || PAYMENT_METHODS.WALLET,
+          isPaid: Boolean(booking.isPaid),
           walkInInfo: booking.walkInInfo || null,
         }
       : null,
@@ -577,6 +580,26 @@ exports.recordOnsitePayment = asyncHandler(async (req, res) => {
       await invoice.save({ session: txn });
       invoiceAfter = invoice.toObject();
 
+      if (invoice.session_id) {
+        const sessionDoc = await Session.findOne({ id: invoice.session_id })
+          .select("bookingId bookingRef")
+          .session(txn);
+
+        const bookingFilter = sessionDoc?.bookingId
+          ? { _id: sessionDoc.bookingId }
+          : sessionDoc?.bookingRef
+            ? { id: sessionDoc.bookingRef }
+            : null;
+
+        if (bookingFilter) {
+          await Booking.updateOne(
+            bookingFilter,
+            { $set: { isPaid: true } },
+            { session: txn }
+          );
+        }
+      }
+
       const created = await OnsitePayment.create(
         [
           {
@@ -602,6 +625,18 @@ exports.recordOnsitePayment = asyncHandler(async (req, res) => {
     throw error;
   } finally {
     txn.endSession();
+  }
+
+  if (invoiceAfter?.session_id) {
+    const sessionDoc = await Session.findOne({ id: invoiceAfter.session_id })
+      .select("bookingId")
+      .lean();
+    if (sessionDoc?.bookingId) {
+      const booking = await Booking.findById(sessionDoc.bookingId);
+      if (booking) {
+        bookingMonitor.syncBooking(booking);
+      }
+    }
   }
 
   if (invoiceBefore && invoiceAfter) {

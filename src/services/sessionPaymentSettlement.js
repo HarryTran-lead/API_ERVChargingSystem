@@ -2,6 +2,7 @@ const Wallet = require('../models/Wallet');
 const WalletTransaction = require('../models/WalletTransaction');
 const Invoice = require('../models/Invoice');
 const { PAYMENT_METHODS } = require('../constants/enums');
+const Booking = require("../models/Booking");
 const { notifyInvoiceChange } = require('./invoiceNotifier');
 
 const toPlain = (doc) =>
@@ -125,6 +126,19 @@ async function settleSessionPayment(sessionDoc) {
           },
         };
         await invoice.save({ session: mongoSession });
+        const bookingFilter = session.bookingId
+          ? { _id: session.bookingId }
+          : session.bookingRef
+            ? { id: session.bookingRef }
+            : null;
+
+        if (bookingFilter) {
+          await Booking.updateOne(
+            bookingFilter,
+            { $set: { isPaid: true } },
+            { session: mongoSession }
+          );
+        }
       }
 
       outcome.status = 'PAID';

@@ -131,7 +131,7 @@ const shapeBooking = (doc) => {
   if (booking.connectorId && booking.connectorId.toString) {
     booking.connectorId = booking.connectorId.toString();
   }
-
+  booking.isPaid = Boolean(booking.isPaid);
   return booking;
 };
 

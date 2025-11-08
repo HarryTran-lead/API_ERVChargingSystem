@@ -167,6 +167,7 @@ const shapeSession = (doc) => {
           slotStart: booking.slotStart,
           slotEnd: booking.slotEnd,
           userId: booking.userId,
+          isPaid: Boolean(booking.isPaid),
         }
       : null,
     station: station
@@ -608,6 +609,14 @@ exports.stopSession = asyncHandler(async (req, res) => {
 
   const invoicePlain = invoiceDoc ? toPlain(invoiceDoc) : null;
 
+  if (settlement?.status === "PAID" && finalized.bookingId) {
+    const updatedBooking = await Booking.findById(finalized.bookingId);
+    if (updatedBooking) {
+      bookingMonitor.syncBooking(updatedBooking);
+    }
+  }
+
+  
   await notifySessionCompleted(payload, settlement);
   if (invoicePlain) {
     await notifyInvoiceIssued(invoicePlain);

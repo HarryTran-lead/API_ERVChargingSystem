@@ -145,7 +145,7 @@ const shapeBooking = (doc) => {
   booking.paymentMethod = booking.paymentMethod || PAYMENT_METHODS.WALLET;
   booking.createdByStaffId = booking.createdByStaffId || null;
   booking.walkInInfo = booking.walkInInfo || null;
-
+  booking.isPaid = Boolean(booking.isPaid);
   return booking;
 };
 
@@ -822,7 +822,16 @@ exports.updateBookingStatus = asyncHandler(async (req, res) => {
       });
     }
 
-    const detailed = await populateBookingDetails(refreshed);
+    let latestBooking = await Booking.findById(booking._id);
+    if (!latestBooking) {
+      latestBooking = refreshed;
+    }
+
+    if (settlement?.status === "PAID" && latestBooking) {
+      bookingMonitor.syncBooking(latestBooking);
+    }
+
+    const detailed = await populateBookingDetails(latestBooking);
     return res.json({
       message: 'Booking marked as completed',
       booking: detailed,

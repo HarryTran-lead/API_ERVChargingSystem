@@ -10,16 +10,16 @@ const {
 const BookingSchema = new mongoose.Schema(
   {
     id: { type: String, default: uuidv4, unique: true },
-    userId: { type: String, ref: 'User', required: true, index: true },
+    userId: { type: String, ref: "User", required: true, index: true },
     stationId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Station',
+      ref: "Station",
       required: true,
       index: true,
     },
     connectorId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Connector',
+      ref: "Connector",
       required: true,
       index: true,
     },
@@ -29,14 +29,14 @@ const BookingSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: BOOKING_STATUS_VALUES,
-      default: 'RESERVED',
+      default: "RESERVED",
       index: true,
     },
 
     // Vehicle snapshot
-    vehicleId: { type: String, ref: 'Vehicle', index: true },
+    vehicleId: { type: String, ref: "Vehicle", index: true },
     vehicle: {
-      id: { type: String, ref: 'Vehicle' },
+      id: { type: String, ref: "Vehicle" },
       make: { type: String, trim: true },
       model: { type: String, trim: true },
       plugType: { type: String, enum: VEHICLE_PLUG_TYPES },
@@ -50,7 +50,8 @@ const BookingSchema = new mongoose.Schema(
       enum: Object.values(PAYMENT_METHODS),
       default: PAYMENT_METHODS.WALLET,
     },
-    createdByStaffId: { type: String, ref: 'User', index: true },
+    isPaid: { type: Boolean, default: false },
+    createdByStaffId: { type: String, ref: "User", index: true },
     walkInInfo: {
       name: { type: String, trim: true },
       phone: { type: String, trim: true },

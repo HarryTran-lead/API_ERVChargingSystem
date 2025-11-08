@@ -375,6 +375,7 @@ exports.getChargerScanDetails = asyncHandler(async (req, res) => {
         slotStart: formattedBooking.slotStart,
         slotEnd: formattedBooking.slotEnd,
         checkInDeadline: formattedBooking.checkInDeadline,
+        isPaid: Boolean(booking.isPaid),
         estimatedChargeMinutes: estimatedMinutes,
         estimatedFinishAt,
         vehicleId: linkedVehicleDoc?.id || booking.vehicleId || undefined,
