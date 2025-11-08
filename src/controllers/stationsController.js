@@ -3,6 +3,11 @@ const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
 const Charger = require("../models/Charger");
 const Connector = require("../models/Connector");
+const Vehicle = require("../models/Vehicle");
+const { ensureRequestUserId } = require("../utils/requestUser");
+const {
+  getConnectorTypesForVehiclePlug,
+} = require("../utils/connectorCompatibility");
 const mongoose = require("mongoose");
 
 const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
@@ -240,6 +245,174 @@ exports.getStationWithAssets = asyncHandler(async (req, res) => {
     ...station,
     chargers: chargersWithConnectors,
   });
+});
+
+exports.listCompatibleStationsForVehicle = asyncHandler(async (req, res) => {
+  const userId = ensureRequestUserId(req);
+
+  const defaultVehicle = await Vehicle.findOne({
+    user_id: userId,
+    deleted_at: null,
+    is_default: true,
+  }).lean();
+
+  if (!defaultVehicle) {
+    throw new HttpError(
+      409,
+      "DEFAULT_VEHICLE_REQUIRED: Please register a vehicle and set it as default to fetch compatible stations."
+    );
+  }
+
+  const baseVehiclePayload = {
+    id: defaultVehicle.id,
+    plugType: defaultVehicle.plug_type,
+    batteryKwh: defaultVehicle.battery_kwh,
+    isDefault: defaultVehicle.is_default,
+  };
+
+  const connectorTypes = getConnectorTypesForVehiclePlug(
+    defaultVehicle.plug_type
+  );
+  const sendResponse = (stationsPayload) =>
+    res.json({
+      vehicle: baseVehiclePayload,
+      connectorTypes,
+      stations: stationsPayload,
+    });
+
+  if (connectorTypes.length === 0) {
+    return sendResponse([]);
+  }
+
+  const { connectorStatus, stationStatus } = req.query;
+
+  const connectorFilter = { type: { $in: connectorTypes } };
+  if (connectorStatus) connectorFilter.status = connectorStatus;
+
+  const connectors = await Connector.find(connectorFilter).lean();
+
+  if (connectors.length === 0) {
+    return sendResponse([]);
+  }
+
+  const stationIdStrings = connectors
+    .map((conn) => (conn.stationId ? conn.stationId.toString() : null))
+    .filter(Boolean);
+
+  const uniqueStationIdStrings = [...new Set(stationIdStrings)];
+
+  const stationObjectIds = uniqueStationIdStrings
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  if (stationObjectIds.length === 0) {
+    return sendResponse([]);
+  }
+
+  const stationFilter = { _id: { $in: stationObjectIds } };
+  if (stationStatus) stationFilter.status = stationStatus;
+
+  const stations = await Station.find(stationFilter).lean();
+
+  if (stations.length === 0) {
+    return sendResponse([]);
+  }
+
+  const stationMap = new Map(stations.map((st) => [st._id.toString(), st]));
+  const allowedStationIds = new Set(stations.map((st) => st._id.toString()));
+
+  const filteredConnectors = connectors.filter(
+    (conn) => conn.stationId && allowedStationIds.has(conn.stationId.toString())
+  );
+
+  if (filteredConnectors.length === 0) {
+    return sendResponse([]);
+  }
+
+  const chargerIdStrings = filteredConnectors
+    .map((conn) => (conn.chargerId ? conn.chargerId.toString() : null))
+    .filter(Boolean);
+
+  const uniqueChargerIdStrings = [...new Set(chargerIdStrings)];
+
+  const chargerObjectIds = uniqueChargerIdStrings
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  const chargers = chargerObjectIds.length
+    ? await Charger.find({ _id: { $in: chargerObjectIds } }).lean()
+    : [];
+
+  if (chargers.length === 0) {
+    return sendResponse([]);
+  }
+
+  const chargerMap = new Map(chargers.map((ch) => [ch._id.toString(), ch]));
+
+  const stationsWithChargers = new Map();
+
+  filteredConnectors.forEach((connector) => {
+    const stationIdStr = connector.stationId.toString();
+    const chargerIdStr = connector.chargerId
+      ? connector.chargerId.toString()
+      : null;
+    if (!chargerIdStr) return;
+    const chargerDoc = chargerMap.get(chargerIdStr);
+    const stationDoc = stationMap.get(stationIdStr);
+    if (!chargerDoc || !stationDoc) return;
+
+    let stationEntry = stationsWithChargers.get(stationIdStr);
+    if (!stationEntry) {
+      stationEntry = {
+        station: stationDoc,
+        chargers: new Map(),
+      };
+      stationsWithChargers.set(stationIdStr, stationEntry);
+    }
+
+    let chargerEntry = stationEntry.chargers.get(chargerIdStr);
+    if (!chargerEntry) {
+      chargerEntry = {
+        ...chargerDoc,
+        connectors: [],
+      };
+      stationEntry.chargers.set(chargerIdStr, chargerEntry);
+    }
+
+    chargerEntry.connectors.push(connector);
+  });
+
+  if (stationsWithChargers.size === 0) {
+    return sendResponse([]);
+  }
+
+  const stationsPayload = [];
+
+  stationsWithChargers.forEach(({ station, chargers: chargerEntries }) => {
+    const chargerList = Array.from(chargerEntries.values());
+    const totalConnectors = chargerList.reduce(
+      (sum, charger) => sum + charger.connectors.length,
+      0
+    );
+    const availableConnectors = chargerList.reduce(
+      (sum, charger) =>
+        sum +
+        charger.connectors.filter((conn) => conn.status === "IDLE").length,
+      0
+    );
+
+    stationsPayload.push({
+      ...station,
+      chargers: chargerList,
+      summary: {
+        totalChargers: chargerList.length,
+        totalConnectors,
+        availableConnectors,
+      },
+    });
+  });
+
+  sendResponse(stationsPayload);
 });
 
 exports.deleteStation = asyncHandler(async (req, res) => {

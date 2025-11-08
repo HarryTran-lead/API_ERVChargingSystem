@@ -14,6 +14,13 @@ router.get(
   protect([ROLES.ADMIN, ROLES.STAFF, ROLES.DRIVER]),
   C.listStations
 );
+
+router.get(
+  "/compatible",
+  protect([ROLES.ADMIN, ROLES.STAFF, ROLES.DRIVER]),
+  C.listCompatibleStationsForVehicle
+);
+
 router.get(
   "/:id",
   protect([ROLES.ADMIN, ROLES.STAFF, ROLES.DRIVER]),
