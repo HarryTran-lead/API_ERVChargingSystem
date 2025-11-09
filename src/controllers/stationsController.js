@@ -250,28 +250,50 @@ exports.getStationWithAssets = asyncHandler(async (req, res) => {
 exports.listCompatibleStationsForVehicle = asyncHandler(async (req, res) => {
   const userId = ensureRequestUserId(req);
 
-  const defaultVehicle = await Vehicle.findOne({
+  const { vehicleId, connectorStatus, stationStatus } = req.query;
+
+  const vehicleFilter = {
     user_id: userId,
     deleted_at: null,
-    is_default: true,
-  }).lean();
+  };
 
-  if (!defaultVehicle) {
-    throw new HttpError(
-      409,
-      "DEFAULT_VEHICLE_REQUIRED: Please register a vehicle and set it as default to fetch compatible stations."
-    );
+  let selectedVehicle;
+
+  if (vehicleId) {
+    selectedVehicle = await Vehicle.findOne({
+      ...vehicleFilter,
+      id: vehicleId,
+    }).lean();
+
+    if (!selectedVehicle) {
+      throw new HttpError(
+        404,
+        "VEHICLE_NOT_FOUND: The requested vehicle does not exist or belongs to another user."
+      );
+    }
+  } else {
+    selectedVehicle = await Vehicle.findOne({
+      ...vehicleFilter,
+      is_default: true,
+    }).lean();
+
+    if (!selectedVehicle) {
+      throw new HttpError(
+        409,
+        "DEFAULT_VEHICLE_REQUIRED: Please register a vehicle and set it as default or specify vehicleId to fetch compatible stations."
+      );
+    }
   }
 
   const baseVehiclePayload = {
-    id: defaultVehicle.id,
-    plugType: defaultVehicle.plug_type,
-    batteryKwh: defaultVehicle.battery_kwh,
-    isDefault: defaultVehicle.is_default,
+    id: selectedVehicle.id,
+    plugType: selectedVehicle.plug_type,
+    batteryKwh: selectedVehicle.battery_kwh,
+    isDefault: selectedVehicle.is_default,
   };
 
   const connectorTypes = getConnectorTypesForVehiclePlug(
-    defaultVehicle.plug_type
+    selectedVehicle.plug_type
   );
   const sendResponse = (stationsPayload) =>
     res.json({
@@ -283,8 +305,6 @@ exports.listCompatibleStationsForVehicle = asyncHandler(async (req, res) => {
   if (connectorTypes.length === 0) {
     return sendResponse([]);
   }
-
-  const { connectorStatus, stationStatus } = req.query;
 
   const connectorFilter = { type: { $in: connectorTypes } };
   if (connectorStatus) connectorFilter.status = connectorStatus;
