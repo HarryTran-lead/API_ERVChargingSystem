@@ -21,7 +21,7 @@ const {
 const { ensureRequestUserId } = require('../utils/requestUser');
 const asyncHandler = require('../utils/asyncHandler');
 
-// ------- helpers -------
+/* ======================== Helpers gốc ======================== */
 const toArray = (v) =>
   Array.isArray(v) ? v : v && typeof v === 'object' ? Object.values(v) : [];
 
@@ -104,7 +104,100 @@ const buildMonthBuckets = (now, monthsBack) => {
   return buckets;
 };
 
-// ========== GET /api/v1/analytics/me/monthly-costs?year=2025 ==========
+/* ======================== Helpers mới cho range ======================== */
+const pad2 = (n) => String(n).padStart(2, '0');
+const dayKey = (d) =>
+  `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const endOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+
+const addDays = (d, days) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + days);
+const addMonths = (d, months) => new Date(d.getFullYear(), d.getMonth() + months, 1);
+
+const buildDayBuckets = (from, toExclusive) => {
+  const buckets = [];
+  let cur = startOfDay(from);
+  const end = startOfDay(toExclusive);
+  while (cur < end) {
+    buckets.push({ label: dayKey(cur), date: new Date(cur) });
+    cur = addDays(cur, 1);
+  }
+  return buckets;
+};
+
+const buildMonthBucketsRange = (from, toExclusive) => {
+  const buckets = [];
+  let cur = new Date(from.getFullYear(), from.getMonth(), 1);
+  const end = new Date(toExclusive.getFullYear(), toExclusive.getMonth(), 1);
+  while (cur < end) {
+    const y = cur.getFullYear();
+    const m = cur.getMonth() + 1;
+    buckets.push({ label: `${y}-${pad2(m)}`, year: y, month: m });
+    cur = addMonths(cur, 1);
+  }
+  return buckets;
+};
+
+const RANGE_PRESETS = {
+  '1d': { type: 'day', days: 1 },
+  '7d': { type: 'day', days: 7 },
+  '1m': { type: 'day', months: 1 }, // day-level trong 1 tháng
+  '3m': { type: 'month', months: 3 },
+  '6m': { type: 'month', months: 6 },
+  '12m': { type: 'month', months: 12 },
+};
+
+// Trả về from/to (to là exclusive), đơn vị unit ("day"|"month") & key
+function resolveWindow(rangeRaw, yearRaw, endRaw) {
+  const now = new Date();
+  const rangeKey = (rangeRaw || '6m').toLowerCase();
+  const preset = RANGE_PRESETS[rangeKey] || RANGE_PRESETS['6m'];
+
+  let to = endRaw ? new Date(endRaw) : now;
+
+  // Nếu 12m + year => cả năm
+  if (preset.months === 12 && Number.isFinite(Number(yearRaw))) {
+    const y = Number(yearRaw);
+    const from = new Date(y, 0, 1);
+    const toExclusive = new Date(y + 1, 0, 1);
+    return { from, to: toExclusive, unit: 'month', rangeKey };
+  }
+
+  // Nếu có year nhưng không phải 12m => neo to = 01/01/(y+1)
+  if (Number.isFinite(Number(yearRaw))) {
+    const y = Number(yearRaw);
+    to = new Date(y + 1, 0, 1); // exclusive
+  }
+
+  let from, unit;
+  if (preset.type === 'day') {
+    unit = 'day';
+    if (preset.days === 1) {
+      const endDay = startOfDay(to);
+      from = endDay;
+      to = endOfDay(endDay);
+    } else if (preset.days === 7) {
+      const endDay = startOfDay(to);
+      to = endOfDay(endDay);
+      from = addDays(endDay, -6); // 7 ngày gồm hôm nay
+    } else if (preset.months === 1) {
+      const curMonthStart = new Date(to.getFullYear(), to.getMonth(), 1);
+      const nextMonthStart = new Date(to.getFullYear(), to.getMonth() + 1, 1);
+      from = curMonthStart;
+      to = nextMonthStart;
+    }
+  } else {
+    unit = 'month';
+    const lastMonthStart = new Date(to.getFullYear(), to.getMonth(), 1);
+    from = new Date(lastMonthStart.getFullYear(), lastMonthStart.getMonth() - (preset.months - 1), 1);
+    to = new Date(lastMonthStart.getFullYear(), lastMonthStart.getMonth() + 1, 1);
+  }
+
+  return { from, to, unit, rangeKey };
+}
+
+/* ========== GET /api/v1/analytics/me/monthly-costs?year=2025 ========== */
 exports.getMyMonthlyCosts = asyncHandler(async (req, res) => {
   const userId = ensureRequestUserId(req);
   const year = Number(req.query.year) || new Date().getFullYear();
@@ -175,7 +268,7 @@ exports.getMyMonthlyCosts = asyncHandler(async (req, res) => {
   });
 });
 
-// ========== GET /api/v1/analytics/me/habits?from=ISO&to=ISO ==========
+/* ========== GET /api/v1/analytics/me/habits?from=ISO&to=ISO ========== */
 exports.getMyChargingHabits = asyncHandler(async (req, res) => {
   const userId = ensureRequestUserId(req);
   const to = req.query.to ? new Date(req.query.to) : new Date();
@@ -281,28 +374,29 @@ exports.getMyChargingHabits = asyncHandler(async (req, res) => {
   });
 });
 
-// ========== GET /api/v1/analytics/admin/overview ==========
+/* ========== GET /api/v1/analytics/admin/overview
+      ?range=1d|7d|1m|3m|6m|12m&year=YYYY&end=ISO ========== */
 exports.getAdminOverview = asyncHandler(async (req, res) => {
-  const now = new Date();
-  const last30Days = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const endOfToday = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
-  const monthsBack = 6;
-  const sixMonthsAgo = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (monthsBack - 1), 1)
-  );
+  // --- đọc tham số ---
+  const { range, year, end } = req.query;
+  const { from, to, unit, rangeKey } = resolveWindow(range, year, end);
 
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+
+  // --- facets người dùng / trạm / connector / booking ---
   const userStatsPromise = User.aggregate([
     {
       $facet: {
         byRole: [{ $group: { _id: '$role', count: { $sum: 1 } } }],
         byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
-        newLast30Days: [
+        newInRange: [
           {
             $match: {
               $or: [
-                { createdAt: { $gte: last30Days } },
-                { created_at: { $gte: last30Days } }, // hỗ trợ hai kiểu
+                { createdAt: { $gte: from, $lt: to } },
+                { created_at: { $gte: from, $lt: to } },
               ],
             },
           },
@@ -362,9 +456,36 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
           },
           { $count: 'count' },
         ],
+        inRange: [
+          { $match: { slotStart: { $gte: from, $lt: to } } },
+          { $count: 'count' },
+        ],
       },
     },
   ]);
+
+  // --- session facets phụ thuộc range & series ---
+  const sessionSeriesGroup =
+    unit === 'day'
+      ? {
+          _id: {
+            y: { $year: '$createdAt' },
+            m: { $month: '$createdAt' },
+            d: { $dayOfMonth: '$createdAt' },
+          },
+          revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
+          energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+          sessions: { $sum: 1 },
+        }
+      : {
+          _id: {
+            y: { $year: '$createdAt' },
+            m: { $month: '$createdAt' },
+          },
+          revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
+          energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+          sessions: { $sum: 1 },
+        };
 
   const sessionStatsPromise = Session.aggregate([
     {
@@ -389,11 +510,11 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
             },
           },
         ],
-        last30Days: [
+        selectedRange: [
           {
             $match: {
               status: SESSION_STATUS.COMPLETED,
-              createdAt: { $gte: last30Days },
+              createdAt: { $gte: from, $lt: to },
             },
           },
           {
@@ -405,31 +526,21 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
             },
           },
         ],
-        monthly: [
+        series: [
           {
             $match: {
               status: SESSION_STATUS.COMPLETED,
-              createdAt: { $gte: sixMonthsAgo },
+              createdAt: { $gte: from, $lt: to },
             },
           },
-          {
-            $group: {
-              _id: {
-                year: { $year: '$createdAt' },
-                month: { $month: '$createdAt' },
-              },
-              revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
-              energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
-              sessions: { $sum: 1 },
-            },
-          },
-          { $sort: { '_id.year': 1, '_id.month': 1 } },
+          { $group: sessionSeriesGroup },
+          { $sort: { '_id.y': 1, '_id.m': 1, ...(unit === 'day' ? { '_id.d': 1 } : {}) } },
         ],
         topStations: [
           {
             $match: {
               status: SESSION_STATUS.COMPLETED,
-              createdAt: { $gte: last30Days },
+              createdAt: { $gte: from, $lt: to },
             },
           },
           {
@@ -447,6 +558,20 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
     },
   ]);
 
+  // --- invoice facets phụ thuộc range & series ---
+  const invoiceSeriesGroup =
+    unit === 'day'
+      ? {
+          _id: { y: { $year: '$createdAt' }, m: { $month: '$createdAt' }, d: { $dayOfMonth: '$createdAt' } },
+          total: { $sum: { $ifNull: ['$total', 0] } },
+          currency: { $first: { $ifNull: ['$currency', 'VND'] } },
+        }
+      : {
+          _id: { y: { $year: '$createdAt' }, m: { $month: '$createdAt' } },
+          total: { $sum: { $ifNull: ['$total', 0] } },
+          currency: { $first: { $ifNull: ['$currency', 'VND'] } },
+        };
+
   const invoiceStatsPromise = Invoice.aggregate([
     { $match: { status: 'ISSUED' } },
     {
@@ -461,8 +586,8 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
             },
           },
         ],
-        last30Days: [
-          { $match: { createdAt: { $gte: last30Days } } },
+        selectedRange: [
+          { $match: { createdAt: { $gte: from, $lt: to } } },
           {
             $group: {
               _id: null,
@@ -472,24 +597,16 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
             },
           },
         ],
-        monthly: [
-          { $match: { createdAt: { $gte: sixMonthsAgo } } },
-          {
-            $group: {
-              _id: {
-                year: { $year: '$createdAt' },
-                month: { $month: '$createdAt' },
-              },
-              total: { $sum: { $ifNull: ['$total', 0] } },
-              currency: { $first: { $ifNull: ['$currency', 'VND'] } },
-            },
-          },
-          { $sort: { '_id.year': 1, '_id.month': 1 } },
+        series: [
+          { $match: { createdAt: { $gte: from, $lt: to } } },
+          { $group: invoiceSeriesGroup },
+          { $sort: { '_id.y': 1, '_id.m': 1, ...(unit === 'day' ? { '_id.d': 1 } : {}) } },
         ],
       },
     },
   ]);
 
+  // --- feedback facets phụ thuộc range ---
   const feedbackStatsPromise = Feedback.aggregate([
     {
       $facet: {
@@ -502,8 +619,8 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
             },
           },
         ],
-        last30Days: [
-          { $match: { createdAt: { $gte: last30Days } } },
+        selectedRange: [
+          { $match: { createdAt: { $gte: from, $lt: to } } },
           {
             $group: {
               _id: null,
@@ -525,6 +642,7 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
     },
   ]);
 
+  // --- chạy song song ---
   const [
     userStatsResult,
     stationStatusRows,
@@ -543,6 +661,7 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
     feedbackStatsPromise,
   ]);
 
+  // --- bóc kết quả ---
   const userStats = userStatsResult?.[0] || {};
   const connectorStats = connectorStatsResult?.[0] || {};
   const bookingStats = bookingStatsResult?.[0] || {};
@@ -552,81 +671,77 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
 
   const userByRole = buildCountMap(userStats.byRole, toArray(ROLES));
   const userByStatus = buildCountMap(userStats.byStatus, ['ACTIVE', 'SUSPENDED']);
-  const totalUsers = Object.values(userByRole).reduce((sum, count) => sum + count, 0);
+  const totalUsers = Object.values(userByRole).reduce((sum, c) => sum + c, 0);
 
   const stationByStatus = buildCountMap(stationStatusRows, toArray(STATION_STATUS));
-  const totalStations = Object.values(stationByStatus).reduce((sum, count) => sum + count, 0);
+  const totalStations = Object.values(stationByStatus).reduce((s, c) => s + c, 0);
 
   const connectorsByStatus = buildConnectorMap(connectorStats.byStatus, toArray(CONNECTOR_STATUS));
   const connectorsByType = buildConnectorMap(connectorStats.byType);
-  const totalConnectors = Object.values(connectorsByStatus).reduce((sum, item) => sum + item.count, 0);
-  const totalConnectorPowerKw = Object.values(connectorsByStatus).reduce(
-    (sum, item) => sum + item.totalPowerKw,
-    0
-  );
+  const totalConnectors = Object.values(connectorsByStatus).reduce((s, it) => s + it.count, 0);
+  const totalConnectorPowerKw = Object.values(connectorsByStatus).reduce((s, it) => s + it.totalPowerKw, 0);
 
   const bookingsByStatus = buildCountMap(bookingStats.byStatus, BOOKING_STATUS_VALUES);
-  const totalBookings = Object.values(bookingsByStatus).reduce((sum, count) => sum + count, 0);
+  const totalBookings = Object.values(bookingsByStatus).reduce((s, c) => s + c, 0);
   const upcomingBookings = getFacetCount(bookingStats.upcoming);
   const todayBookings = getFacetCount(bookingStats.today);
 
   const sessionsByStatus = buildCountMap(sessionStats.byStatus, SESSION_STATUS_VALUES);
-  const totalSessions = Object.values(sessionsByStatus).reduce((sum, count) => sum + count, 0);
+  const totalSessions = Object.values(sessionsByStatus).reduce((s, c) => s + c, 0);
   const activeSessions = getFacetCount(sessionStats.active);
 
   const lifetimeCharging = getFacetMetrics(sessionStats.lifetime);
-  const last30Charging = getFacetMetrics(sessionStats.last30Days);
+  const selectedRangeCharging = getFacetMetrics(sessionStats.selectedRange);
 
   const revenueLifetime = getFacetRevenue(invoiceStats.lifetime);
-  const revenueLast30 = getFacetRevenue(invoiceStats.last30Days);
+  const revenueSelected = getFacetRevenue(invoiceStats.selectedRange);
 
-  const monthBuckets = buildMonthBuckets(now, monthsBack);
+  // --- series buckets & map ---
+  const seriesBuckets = unit === 'day'
+    ? buildDayBuckets(from, to)
+    : buildMonthBucketsRange(from, to);
 
-  const revenueMonthlyMap = new Map();
-  for (const row of invoiceStats.monthly || []) {
-    if (!row || !row._id) continue;
-    revenueMonthlyMap.set(monthKey(row._id.year, row._id.month), row.total || 0);
-  }
-
-  const chargingMonthlyMap = new Map();
-  for (const row of sessionStats.monthly || []) {
-    if (!row || !row._id) continue;
-    chargingMonthlyMap.set(monthKey(row._id.year, row._id.month), {
-      revenue: row.revenue || 0,
-      energyKwh: row.energyKwh || 0,
-      sessions: row.sessions || 0,
+  const chargingSeriesMap = new Map();
+  for (const row of sessionStats.series || []) {
+    const y = row?._id?.y;
+    const m = row?._id?.m;
+    const d = unit === 'day' ? row?._id?.d : null;
+    const label = unit === 'day' ? `${y}-${pad2(m)}-${pad2(d)}` : `${y}-${pad2(m)}`;
+    chargingSeriesMap.set(label, {
+      revenue: row?.revenue || 0,
+      energyKwh: row?.energyKwh || 0,
+      sessions: row?.sessions || 0,
     });
   }
 
-  const revenueMonthly = monthBuckets.map(({ label }) => ({
-    month: label,
-    total: revenueMonthlyMap.get(label) || 0,
+  const revenueSeriesMap = new Map();
+  for (const row of (invoiceStats.series || [])) {
+    const y = row?._id?.y;
+    const m = row?._id?.m;
+    const d = unit === 'day' ? row?._id?.d : null;
+    const label = unit === 'day' ? `${y}-${pad2(m)}-${pad2(d)}` : `${y}-${pad2(m)}`;
+    revenueSeriesMap.set(label, row?.total || 0);
+  }
+
+  const revenueSeries = seriesBuckets.map(({ label }) => ({
+    bucket: label,
+    total: revenueSeriesMap.get(label) || 0,
   }));
 
-  const chargingMonthly = monthBuckets.map(({ label }) => {
-    const item = chargingMonthlyMap.get(label) || {
-      revenue: 0,
-      energyKwh: 0,
-      sessions: 0,
-    };
-    return {
-      month: label,
-      revenue: item.revenue,
-      energyKwh: item.energyKwh,
-      sessions: item.sessions,
-    };
+  const chargingSeries = seriesBuckets.map(({ label }) => {
+    const v = chargingSeriesMap.get(label) || { revenue: 0, energyKwh: 0, sessions: 0 };
+    return { bucket: label, ...v };
   });
 
+  // --- top stations trong khoảng chọn ---
   const topStationsRaw = sessionStats.topStations || [];
   const topStationIds = topStationsRaw.map((r) => r?._id).filter(Boolean);
-
   const stationDocs =
     topStationIds.length > 0
       ? await Station.find({ _id: { $in: topStationIds } })
           .select('_id name lat lng status')
           .lean()
       : [];
-
   const stationMeta = new Map(stationDocs.map((doc) => [String(doc._id), doc]));
   const topStations = topStationsRaw.map((row) => {
     const id = row?._id ? String(row._id) : null;
@@ -644,14 +759,22 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
   });
 
   const overallFeedback = feedbackStats.overall?.[0] || null;
-  const last30Feedback = feedbackStats.last30Days?.[0] || null;
+  const inRangeFeedback = feedbackStats.selectedRange?.[0] || null;
   const feedbackDistribution = buildCountMap(feedbackStats.distribution || [], [1, 2, 3, 4, 5]);
 
   const roundRating = (value) =>
     typeof value === 'number' ? Math.round(value * 100) / 100 : null;
 
+  // --- response ---
   return res.json({
     generatedAt: now.toISOString(),
+    range: {
+      key: rangeKey,         // "1d" | "7d" | "1m" | "3m" | "6m" | "12m"
+      unit,                  // "day" | "month"
+      from,                  // inclusive
+      to,                    // exclusive
+      year: Number.isFinite(Number(year)) ? Number(year) : null,
+    },
     totals: {
       users: {
         total: totalUsers,
@@ -659,7 +782,7 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
         byStatus: userByStatus,
         active: userByStatus.ACTIVE || 0,
         suspended: userByStatus.SUSPENDED || 0,
-        newLast30Days: getFacetCount(userStats.newLast30Days),
+        newInRange: getFacetCount(userStats.newInRange),
       },
       stations: {
         total: totalStations,
@@ -676,6 +799,7 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
         byStatus: bookingsByStatus,
         upcoming: upcomingBookings,
         today: todayBookings,
+        inRange: getFacetCount(bookingStats.inRange),
       },
       sessions: {
         total: totalSessions,
@@ -686,21 +810,21 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
     revenue: {
       currency: revenueLifetime.currency || 'VND',
       lifetime: revenueLifetime,
-      last30Days: revenueLast30,
-      monthly: revenueMonthly,
+      selectedRange: revenueSelected,
+      series: { unit, points: revenueSeries }, // [{bucket, total}]
     },
     charging: {
       lifetime: lifetimeCharging,
-      last30Days: last30Charging,
-      monthly: chargingMonthly,
-      topStationsLast30Days: topStations,
+      selectedRange: selectedRangeCharging,
+      series: { unit, points: chargingSeries }, // [{bucket, revenue, energyKwh, sessions}]
+      topStationsInRange: topStations,
     },
     feedback: {
       total: overallFeedback?.total || 0,
       averageRating: roundRating(overallFeedback?.averageRating),
-      last30Days: {
-        total: last30Feedback?.total || 0,
-        averageRating: roundRating(last30Feedback?.averageRating),
+      selectedRange: {
+        total: inRangeFeedback?.total || 0,
+        averageRating: roundRating(inRangeFeedback?.averageRating),
       },
       distribution: feedbackDistribution,
     },
