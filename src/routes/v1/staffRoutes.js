@@ -15,4 +15,6 @@ router.patch('/incidents/:id/status', operations.updateIncidentStatus);
 router.post('/bookings/proxy', operations.createProxyBooking);
 router.get('/sessions/:id/invoice', operations.getSessionInvoice);
 router.get('/invoices', operations.listInvoices);
+router.patch('/chargers/:id/power', operations.toggleChargerPower);
+
 module.exports = router;

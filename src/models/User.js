@@ -13,6 +13,11 @@ const userSchema = new mongoose.Schema({
     enum: ['driver', 'staff', 'admin'],
     default: 'driver'
   },
+    stationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Station',
+    index: true
+  },
   status: { type: String, enum: ['ACTIVE', 'SUSPENDED'], default: 'ACTIVE' },
   created_at: { type: Date, default: Date.now }
 })

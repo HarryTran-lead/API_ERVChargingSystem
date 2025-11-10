@@ -19,11 +19,11 @@ exports.protect = (roles = []) => {
     try {
       const auth = req.headers.authorization || '';
       // chấp nhận chữ hoa/thường “Bearer”
-      if (!/^bearer\s+/i.test(auth)) {
+      if (!/^bearer\\s+/i.test(auth)) {
         return res.status(401).json({ msg: 'No token provided' });
       }
 
-      const token = auth.replace(/^bearer\s+/i, '').trim();
+      const token = auth.replace(/^bearer\\s+/i, '').trim();
       if (!token) return res.status(401).json({ msg: 'No token provided' });
 
       const secret = normalizeSecret(process.env.JWT_SECRET);
@@ -49,7 +49,7 @@ exports.protect = (roles = []) => {
       }
 
       // Lấy user theo field "id" (không phải _id)
-      const user = await User.findOne({ id: payload.id }).select('id role status');
+      const user = await User.findOne({ id: payload.id }).select('id role status stationId');
       if (!user) return res.status(401).json({ msg: 'User not found' });
       if (user.status !== 'ACTIVE') return res.status(403).json({ msg: 'User is not active' });
 
@@ -59,7 +59,12 @@ exports.protect = (roles = []) => {
       }
 
       // Gắn thông tin tối thiểu vào req
-      req.user = { id: user.id, role: user.role };
+      req.user = {
+        id: user.id,
+        role: user.role,
+        stationId: user.stationId ? user.stationId.toString() : undefined,
+      };
+
       return next();
     } catch (err) {
       console.error('[protect] error:', err);

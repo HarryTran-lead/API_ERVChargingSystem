@@ -104,6 +104,29 @@ const parseInvoicePaymentStatuses = (raw) => {
     .filter((token) => INVOICE_PAYMENT_STATUS_SET.has(token));
 };
 
+const resolveStationScope = (req) => {
+  const actor = ensureRequestUser(req);
+  if (actor.role === ROLES.ADMIN) {
+    return { actor, stationId: null, stationObjectId: null };
+  }
+
+  const assignedStation = actor.stationId;
+  if (!assignedStation) {
+    throw new HttpError(403, 'Staff is not assigned to any station');
+  }
+
+  const stationObjectId = toObjectId(assignedStation);
+  if (!stationObjectId) {
+    throw new HttpError(403, 'Assigned station is invalid');
+  }
+
+  return {
+    actor,
+    stationId: stationObjectId.toString(),
+    stationObjectId,
+  };
+}
+
 const parsePositiveInteger = (value, fallback) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -127,7 +150,12 @@ const sanitizeString = (value) => {
 };
 
 const sanitizeVehicleSnapshot = (input) => {
-  if (!input || typeof input !== 'object') return undefined;
+  if (!input) return undefined;
+  if (typeof input === 'string') {
+    const name = sanitizeString(input);
+    return name ? { name } : undefined;
+  }
+  if (typeof input !== 'object') return undefined;
   const snapshot = {
     id: sanitizeString(input.id),
     make: sanitizeString(input.make),
@@ -201,7 +229,15 @@ const buildIncidentQuery = (reference) => {
   }
   return { $or: or };
 };
-
+const buildChargerQuery = (reference) => {
+  if (!reference) return null;
+  const or = [];
+  if (mongoose.Types.ObjectId.isValid(reference)) {
+    or.push({ _id: new mongoose.Types.ObjectId(reference) });
+  }
+  or.push({ code: reference });
+  return or.length ? { $or: or } : null;
+};
 const formatConnector = (doc) => {
   if (!doc) return null;
   return {
@@ -430,11 +466,13 @@ const sumBy = (items, predicate) => items.reduce((total, item) => total + (predi
 /* ======================= STATION STATUS ======================= */
 
 exports.listStationStatuses = asyncHandler(async (req, res) => {
-  ensureRequestUser(req);
+const { stationObjectId } = resolveStationScope(req);
   const { stationId } = req.query;
 
   const identifiers = [];
-  if (stationId) {
+   if (stationObjectId) {
+    identifiers.push(stationObjectId);
+  } else if (stationId) {
     String(stationId)
       .split(',')
       .map((token) => token.trim())
@@ -449,12 +487,15 @@ exports.listStationStatuses = asyncHandler(async (req, res) => {
 
   const stations = await Station.find(stationFilter).lean();
   if (!stations.length) {
+    if (stationObjectId) {
+      throw new HttpError(404, 'Assigned station not found');
+    }
     return res.json({ stations: [] });
   }
 
   const stationIds = stations.map((s) => s._id);
   const [connectors, chargers] = await Promise.all([
-    Connector.find({ stationId: { $in: stationIds } })
+    Connector.find({ stationId: { $in: stationIds }, status: { $ne: 'OFFLINE' } })
       .select('stationId chargerId code status type powerKw updatedAt')
       .lean(),
     Charger.find({ stationId: { $in: stationIds } })
@@ -524,11 +565,42 @@ exports.listStationStatuses = asyncHandler(async (req, res) => {
 
   res.json({ stations: response });
 });
+exports.toggleChargerPower = asyncHandler(async (req, res) => {
+  const { stationObjectId } = resolveStationScope(req);
+  const { id } = req.params;
+  const { status } = req.body || {};
 
+  const normalizedStatus = typeof status === 'string' ? status.trim().toUpperCase() : null;
+  if (!normalizedStatus || !['ONLINE', 'OFFLINE'].includes(normalizedStatus)) {
+    throw new HttpError(400, 'status must be ONLINE or OFFLINE');
+  }
+
+  const query = buildChargerQuery(id);
+  if (!query) {
+    throw new HttpError(400, 'Invalid charger identifier');
+  }
+
+  const scopedQuery = stationObjectId ? { $and: [query, { stationId: stationObjectId }] } : query;
+
+  const charger = await Charger.findOneAndUpdate(
+    scopedQuery,
+    { $set: { status: normalizedStatus } },
+    { new: true }
+  );
+
+  if (!charger) {
+    throw new HttpError(404, 'Charger not found');
+  }
+
+  res.json({
+    message: normalizedStatus === 'ONLINE' ? 'Charger turned on' : 'Charger turned off',
+    charger: formatCharger(charger),
+  });
+});
 /* ======================= ONSITE PAYMENT ======================= */
 
 exports.recordOnsitePayment = asyncHandler(async (req, res) => {
-  ensureRequestUser(req);
+  const { stationObjectId } = resolveStationScope(req);
   const staffId = ensureRequestUserId(req);
   const { sessionId, invoiceId, amount, method, note } = req.body || {};
 
@@ -564,7 +636,17 @@ exports.recordOnsitePayment = asyncHandler(async (req, res) => {
       if (!Number.isInteger(totalAmount) || totalAmount < 0) {
         throw new HttpError(400, 'amount must be a non-negative integer');
       }
+const sessionDoc = await Session.findOne({ id: invoice.session_id })
+        .select('bookingId bookingRef stationId')
+        .session(txn);
 
+      if (!sessionDoc) {
+        throw new HttpError(404, 'Charging session linked to invoice was not found');
+      }
+
+      if (stationObjectId && !sessionDoc.stationId?.equals(stationObjectId)) {
+        throw new HttpError(403, 'Invoice does not belong to your station');
+      }
       invoice.payment_status = 'PAID';
       invoice.paid_at = new Date();
       invoice.paid_total = totalAmount;
@@ -580,25 +662,20 @@ exports.recordOnsitePayment = asyncHandler(async (req, res) => {
       await invoice.save({ session: txn });
       invoiceAfter = invoice.toObject();
 
-      if (invoice.session_id) {
-        const sessionDoc = await Session.findOne({ id: invoice.session_id })
-          .select("bookingId bookingRef")
-          .session(txn);
+const bookingFilter = sessionDoc.bookingId
+        ? { _id: sessionDoc.bookingId }
+        : sessionDoc.bookingRef
+          ? { id: sessionDoc.bookingRef }
+          : null;
 
-        const bookingFilter = sessionDoc?.bookingId
-          ? { _id: sessionDoc.bookingId }
-          : sessionDoc?.bookingRef
-            ? { id: sessionDoc.bookingRef }
-            : null;
-
-        if (bookingFilter) {
-          await Booking.updateOne(
-            bookingFilter,
-            { $set: { isPaid: true } },
-            { session: txn }
-          );
-        }
+      if (bookingFilter) {
+        await Booking.updateOne(
+          bookingFilter,
+          { $set: { isPaid: true } },
+          { session: txn }
+        );
       }
+
 
       const created = await OnsitePayment.create(
         [
@@ -653,20 +730,27 @@ exports.recordOnsitePayment = asyncHandler(async (req, res) => {
 /* ======================= PROXY BOOKING (STAFF) ======================= */
 
 exports.createProxyBooking = asyncHandler(async (req, res) => {
-  ensureRequestUser(req);
+  const { stationObjectId } = resolveStationScope(req);
   const staffId = ensureRequestUserId(req);
   const {
-    connectorId,
+    connectorId: rawConnectorId,
     slotStart,
     durationMinutes,
     userId,
     guest,
     vehicle,
     paymentMethod: rawPaymentMethod,
+    customerName,
+    customerPhone,
+    customerNote,
   } = req.body || {};
 
-  if (!connectorId || !slotStart) {
+  if (!rawConnectorId || !slotStart) {
     throw new HttpError(400, 'connectorId and slotStart are required');
+  }
+const connectorId = toObjectId(rawConnectorId);
+  if (!connectorId) {
+    throw new HttpError(400, 'Invalid connectorId');
   }
 
   const start = new Date(slotStart);
@@ -683,8 +767,13 @@ exports.createProxyBooking = asyncHandler(async (req, res) => {
   const checkInDeadline = new Date(normalizedStart.getTime() + BOOKING_GRACE_MINUTES * 60 * 1000);
 
   const normalizedUserId = sanitizeString(userId);
-  const walkInInfo = sanitizeWalkInInfo(guest);
-  const targetUserId = normalizedUserId || `guest:${uuidv4()}`;
+const walkInInfo =
+    sanitizeWalkInInfo(guest) ||
+    sanitizeWalkInInfo({ name: customerName, phone: customerPhone, note: customerNote });
+
+  if (!normalizedUserId && !walkInInfo?.name) {
+    throw new HttpError(400, 'Guest name is required when userId is not provided');
+  }  const targetUserId = normalizedUserId || `guest:${uuidv4()}`;
 
   const paymentMethod = normalizePaymentMethod(rawPaymentMethod);
   if (!normalizedUserId && paymentMethod !== PAYMENT_METHODS.ONSITE) {
@@ -706,8 +795,12 @@ exports.createProxyBooking = asyncHandler(async (req, res) => {
 
   let connectorDoc;
   try {
+    const connectorFilter = { _id: connectorId, status: 'IDLE' };
+    if (stationObjectId) {
+      connectorFilter.stationId = stationObjectId;
+    }
     connectorDoc = await Connector.findOneAndUpdate(
-      { _id: connectorId, status: 'IDLE' },
+            connectorFilter,
       { $set: { status: 'RESERVED' } },
       { new: true }
     );
@@ -719,7 +812,7 @@ exports.createProxyBooking = asyncHandler(async (req, res) => {
     const booking = await Booking.create({
       userId: targetUserId,
       stationId: connectorDoc.stationId,
-      connectorId,
+           connectorId: connectorDoc._id,
       slotStart: normalizedStart,
       slotEnd,
       checkInDeadline,
@@ -768,7 +861,7 @@ exports.createProxyBooking = asyncHandler(async (req, res) => {
 /* ======================= INCIDENTS ======================= */
 
 exports.reportIncident = asyncHandler(async (req, res) => {
-  const actor = ensureRequestUser(req);
+  const { stationObjectId } = resolveStationScope(req);
   const staffId = ensureRequestUserId(req);
   const { stationId, connectorId, title, description, severity, attachments, meta } = req.body || {};
 
@@ -778,10 +871,20 @@ exports.reportIncident = asyncHandler(async (req, res) => {
   if (!description) {
     throw new HttpError(400, 'description is required');
   }
+const incidentStationId = toObjectId(stationId);
+  if (!incidentStationId) {
+    throw new HttpError(400, 'Invalid stationId');
+  }
+
+  if (stationObjectId && !incidentStationId.equals(stationObjectId)) {
+    throw new HttpError(403, 'You are not allowed to report incidents for another station');
+  }
+
+  const incidentConnectorId = connectorId ? toObjectId(connectorId) : null;
 
   const payload = {
-    stationId,
-    connectorId: connectorId || undefined,
+  stationId: incidentStationId,
+    connectorId: incidentConnectorId || undefined,
     reportedBy: staffId,
     title: title ? String(title).trim() : undefined,
     description: String(description).trim(),
@@ -802,7 +905,7 @@ exports.reportIncident = asyncHandler(async (req, res) => {
 });
 
 exports.listIncidentReports = asyncHandler(async (req, res) => {
-  ensureRequestUser(req);
+  const { stationObjectId } = resolveStationScope(req);
   const { status, stationId, severity, page = 1, limit = 20 } = req.query;
 
   const filter = {};
@@ -813,8 +916,9 @@ exports.listIncidentReports = asyncHandler(async (req, res) => {
       .filter((token) => INCIDENT_STATUS_SET.has(token));
     if (statuses.length) filter.status = { $in: statuses };
   }
-  if (stationId) {
-    const objectId = toObjectId(stationId);
+if (stationObjectId) {
+    filter.stationId = stationObjectId;
+  } else if (stationId) {    const objectId = toObjectId(stationId);
     if (objectId) filter.stationId = objectId;
   }
   if (severity) {
@@ -846,7 +950,7 @@ exports.listIncidentReports = asyncHandler(async (req, res) => {
 });
 
 exports.updateIncidentStatus = asyncHandler(async (req, res) => {
-  const actor = ensureRequestUser(req);
+  const { actor, stationObjectId } = resolveStationScope(req);
   const staffId = ensureRequestUserId(req);
   const { status } = req.body || {};
   const incidentId = req.params.id;
@@ -862,6 +966,7 @@ exports.updateIncidentStatus = asyncHandler(async (req, res) => {
   if (!allowedStatuses.includes(normalizedStatus)) {
     throw new HttpError(403, 'You are not allowed to set this status');
   }
+  const scopedQuery = stationObjectId ? { $and: [query, { stationId: stationObjectId }] } : query;
 
   const query = buildIncidentQuery(incidentId);
   if (!query) {
@@ -881,7 +986,7 @@ exports.updateIncidentStatus = asyncHandler(async (req, res) => {
     updates.resolvedAt = null;
   }
 
-  const incident = await StationIncident.findOneAndUpdate(query, { $set: updates }, { new: true });
+  const incident = await StationIncident.findOneAndUpdate(scopedQuery, { $set: updates }, { new: true });
   if (!incident) {
     throw new HttpError(404, 'Incident not found');
   }
@@ -895,11 +1000,11 @@ exports.updateIncidentStatus = asyncHandler(async (req, res) => {
 /* ======================= OPERATIONAL LISTS ======================= */
 
 exports.listOperationalBookings = asyncHandler(async (req, res) => {
-  ensureRequestUser(req);
+  const { stationObjectId } = resolveStationScope(req);
   const { status, stationId, from, to, search, page = 1, limit = 20, sort } = req.query || {};
 
   const statuses = parseBookingStatuses(status);
-  const stationIds = parseObjectIdList(stationId);
+  const stationIds = stationObjectId ? [] : parseObjectIdList(stationId);
   const startDate = parseDate(from);
   const endDate = parseDate(to);
 
@@ -907,7 +1012,11 @@ exports.listOperationalBookings = asyncHandler(async (req, res) => {
     status: { $in: statuses.length ? statuses : DEFAULT_OPERATIONAL_BOOKING_STATUSES },
   };
 
-  if (stationIds.length) {
+ if (stationObjectId) {
+    baseMatch.stationId = stationObjectId;
+  } else if (stationIds.length === 1) {
+    baseMatch.stationId = stationIds[0];
+  } else if (stationIds.length > 1) {
     baseMatch.stationId = { $in: stationIds };
   }
 
@@ -1018,7 +1127,7 @@ exports.listOperationalBookings = asyncHandler(async (req, res) => {
 });
 
 exports.listOperationalSessions = asyncHandler(async (req, res) => {
-  ensureRequestUser(req);
+  const { stationObjectId } = resolveStationScope(req);
   const {
     status,
     stationId,
@@ -1033,7 +1142,7 @@ exports.listOperationalSessions = asyncHandler(async (req, res) => {
   } = req.query || {};
 
   const statuses = parseSessionStatuses(status);
-  const stationIds = parseObjectIdList(stationId);
+  const stationIds = stationObjectId ? [] : parseObjectIdList(stationId);
   const connectorIds = parseObjectIdList(connectorId);
   const startDate = parseDate(from);
   const endDate = parseDate(to);
@@ -1042,8 +1151,12 @@ exports.listOperationalSessions = asyncHandler(async (req, res) => {
     status: { $in: statuses.length ? statuses : DEFAULT_OPERATIONAL_SESSION_STATUSES },
   };
 
-  if (stationIds.length) {
-    baseMatch.stationId = stationIds.length === 1 ? stationIds[0] : { $in: stationIds };
+if (stationObjectId) {
+    baseMatch.stationId = stationObjectId;
+  } else if (stationIds.length === 1) {
+    baseMatch.stationId = stationIds[0];
+  } else if (stationIds.length > 1) {
+    baseMatch.stationId = { $in: stationIds };
   }
   if (connectorIds.length) {
     baseMatch.connectorId = connectorIds.length === 1 ? connectorIds[0] : { $in: connectorIds };
@@ -1162,7 +1275,7 @@ exports.listOperationalSessions = asyncHandler(async (req, res) => {
 /* ======================= INVOICES ======================= */
 
 exports.listInvoices = asyncHandler(async (req, res) => {
-  ensureRequestUser(req);
+  const { stationObjectId } = resolveStationScope(req);
   const {
     page = 1,
     limit = 20,
@@ -1215,11 +1328,45 @@ exports.listInvoices = asyncHandler(async (req, res) => {
 
   const allowedSort = new Set(['createdAt', 'updatedAt', 'issued_at', 'due_at', 'total']);
   const sortSpec = parseSortSpec(sort, allowedSort, { createdAt: -1 });
+  const pipeline = [{ $match: filter }];
 
-  const [items, total] = await Promise.all([
-    Invoice.find(filter).sort(sortSpec).skip(skip).limit(pageSize).lean(),
-    Invoice.countDocuments(filter),
-  ]);
+pipeline.push({
+    $lookup: {
+      from: 'sessions',
+      localField: 'session_id',
+      foreignField: 'id',
+      as: 'session',
+    },
+  });
+
+  pipeline.push({ $unwind: { path: '$session', preserveNullAndEmptyArrays: false } });
+
+  if (stationObjectId) {
+    pipeline.push({ $match: { 'session.stationId': stationObjectId } });
+  }
+
+  pipeline.push({
+    $facet: {
+      metadata: [{ $count: 'total' }],
+      items: [
+        { $sort: sortSpec },
+        { $skip: skip },
+        { $limit: pageSize },
+        { $project: { session: 0 } },
+      ],
+    },
+  });
+
+  pipeline.push({
+    $project: {
+      total: { $ifNull: [{ $first: '$metadata.total' }, 0] },
+      items: 1,
+    },
+  });
+
+  const [result] = await Invoice.aggregate(pipeline);
+  const total = result?.total || 0;
+  const items = (result?.items || []).map((invoice) => formatInvoiceDates(invoice));
 
   res.json({
     pagination: {
@@ -1228,12 +1375,12 @@ exports.listInvoices = asyncHandler(async (req, res) => {
       total,
       pages: pageSize ? Math.ceil(total / pageSize) : 0,
     },
-    items: items.map((invoice) => formatInvoiceDates(invoice)),
+    items,
   });
 });
 
 exports.getSessionInvoice = asyncHandler(async (req, res) => {
-  ensureRequestUser(req);
+  const { stationObjectId } = resolveStationScope(req);
   const { id } = req.params;
 
   const session = await Session.findOne({
@@ -1243,7 +1390,9 @@ exports.getSessionInvoice = asyncHandler(async (req, res) => {
   if (!session) {
     throw new HttpError(404, 'Session not found');
   }
-
+if (stationObjectId && !session.stationId?.equals(stationObjectId)) {
+    throw new HttpError(403, 'You are not allowed to access invoices for this session');
+  }
   const invoice = await Invoice.findOne({ session_id: session.id });
   if (!invoice) {
     throw new HttpError(404, 'Invoice not found for this session');
