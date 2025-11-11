@@ -19,11 +19,11 @@ exports.protect = (roles = []) => {
     try {
       const auth = req.headers.authorization || '';
       // chấp nhận chữ hoa/thường “Bearer”
-      if (!/^bearer\\s+/i.test(auth)) {
+      if (!/^bearer\s+/i.test(auth)) {
         return res.status(401).json({ msg: 'No token provided' });
       }
 
-      const token = auth.replace(/^bearer\\s+/i, '').trim();
+      const token = auth.replace(/^bearer\s+/i, '').trim();
       if (!token) return res.status(401).json({ msg: 'No token provided' });
 
       const secret = normalizeSecret(process.env.JWT_SECRET);
