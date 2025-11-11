@@ -18,7 +18,10 @@ router.post("/", controller.createBooking); // POST /api/v1/admin/bookings
 // 3) Hành động theo id (ưu tiên path cụ thể trước)
 router.post("/:id/cancel", controller.cancelBooking); // POST /api/v1/admin/bookings/:id/cancel
 router.patch("/:id/status", controller.updateBookingStatus); // PATCH /api/v1/admin/bookings/:id/status
-
+router.post(
+  "/:id/resolve-conflict",
+  controller.resolveBookingConflict
+); // POST /api/v1/admin/bookings/:id/resolve-conflict
 // 4) Cuối cùng mới là đọc theo id; dùng regex để tránh nuốt path tĩnh
 router.get("/:id", controller.getBooking); // GET /api/v1/admin/bookings/:id
 

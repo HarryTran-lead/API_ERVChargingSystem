@@ -11,15 +11,19 @@ const Invoice = require('../models/Invoice'); // NEW
 
 const asyncHandler = require('../utils/asyncHandler');
 const { HttpError } = require('../utils/errors');
-const { ensureRequestUserId } = require('../utils/requestUser');
+const {
+  ensureRequestUserId,
+  ensureRequestUser,
+} = require("../utils/requestUser");
 const { BOOKING_SLOT_MINUTES, BOOKING_GRACE_MINUTES } = require('../constants/business');
-const { BOOKING_STATUS, SESSION_STATUS, PAYMENT_METHODS } = require('../constants/enums'); // NEW PAYMENT_METHODS
+const { BOOKING_STATUS, SESSION_STATUS, PAYMENT_METHODS, ROLES } = require('../constants/enums'); // NEW PAYMENT_METHODS
 const { scheduleNoShowJob, cancelNoShowJob } = require('../services/bookingScheduler');
 const bookingMonitor = require('../services/bookingMonitor');
 const { formatBookingDates, formatToVietnamTime, formatInvoiceDates } = require('../utils/timezoneHelpers'); // NEW formatInvoiceDates
 const { completeSessionByReference } = require('../services/sessionFinalizer');
 const { safeNotifyUser } = require('../services/notificationService');
 const { settleSessionPayment } = require('../services/sessionPaymentSettlement'); // NEW
+const { resolveConflict } = require("../services/bookingConflictResolver");
 
 // ========== Utils ==========
 const toMinutes = (ms) => ms / (60 * 1000);
@@ -407,6 +411,70 @@ exports.getMyBookings = asyncHandler(async (req, res) => {
 
   res.json({
     bookings: bookings.map(formatBookingDates),
+  });
+});
+
+exports.resolveBookingConflict = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  if (!id) {
+    throw new HttpError(400, "booking id is required");
+  }
+
+  const operator = ensureRequestUser(req);
+  const operatorRole = operator?.role || ROLES.DRIVER;
+  const userId =
+    operatorRole === ROLES.DRIVER ? ensureRequestUserId(req) : null;
+
+  const query = { $or: [{ id }] };
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    query.$or.push({ _id: new mongoose.Types.ObjectId(id) });
+  }
+  if (userId) {
+    query.userId = userId;
+  }
+
+  const booking = await Booking.findOne(query);
+  if (!booking) {
+    throw new HttpError(404, "Booking not found");
+  }
+
+  if (![BOOKING_STATUS.RESERVED].includes(booking.status)) {
+    throw new HttpError(
+      409,
+      "Only reserved bookings can be adjusted for conflicts"
+    );
+  }
+
+  const decision =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? req.body.decision
+      : null;
+
+  const normalizedDecision =
+    decision && typeof decision === "object" && !Array.isArray(decision)
+      ? {
+          ...decision,
+          type:
+            typeof decision.type === "string"
+              ? decision.type.toUpperCase()
+              : undefined,
+          connectorId: decision.connectorId
+            ? String(decision.connectorId)
+            : undefined,
+        }
+      : null;
+
+  const result = await resolveConflict({
+    booking,
+    decision: normalizedDecision,
+  });
+
+  res.json({
+    message: result.message,
+    state: result.state,
+    booking: result.booking || formatBookingDates(booking.toObject()),
+    suggestion: result.suggestion || null,
+    context: result.context || null,
   });
 });
 
