@@ -1,3 +1,4 @@
+// src/controllers/stationsController.js
 const Station = require("../models/Station");
 const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
@@ -6,11 +7,19 @@ const Connector = require("../models/Connector");
 const Vehicle = require("../models/Vehicle");
 const { ensureRequestUserId } = require("../utils/requestUser");
 const {
+  resolveStaffStationScope,
+  assertStaffStationAccess,
+} = require("../utils/stationScope");
+const {
   getConnectorTypesForVehiclePlug,
 } = require("../utils/connectorCompatibility");
 const mongoose = require("mongoose");
 
 const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
+
+/* ============================================================================
+ * Create station
+ * ==========================================================================*/
 exports.createStation = asyncHandler(async (req, res) => {
   const { name, lat, lng, status } = req.body;
   if (typeof lat !== "number" || typeof lng !== "number") {
@@ -26,28 +35,35 @@ exports.createStation = asyncHandler(async (req, res) => {
   res.status(201).json(station);
 });
 
+/* ============================================================================
+ * List stations (supports near & staff scope)
+ * ==========================================================================*/
 exports.listStations = asyncHandler(async (req, res) => {
+  const { stationObjectId } = resolveStaffStationScope(req);
   const { status, near, radiusKm = 5, page = 1, limit = 20 } = req.query;
-  const q = {};
-  if (status) q.status = status;
 
-  let query = Station.find(q);
+  const filter = {};
+
+  if (stationObjectId) {
+    filter._id = stationObjectId;
+  }
+
+  if (status) filter.status = status;
+
   if (near) {
     // near = "lat,lng"
     const [lat, lng] = near.split(",").map(Number);
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      query = Station.find({
-        location: {
-          $near: {
-            $geometry: { type: "Point", coordinates: [lng, lat] },
-            $maxDistance: Number(radiusKm) * 1000,
-          },
+      filter.location = {
+        $near: {
+          $geometry: { type: "Point", coordinates: [lng, lat] },
+          $maxDistance: Number(radiusKm) * 1000,
         },
-      });
+      };
     }
   }
 
-  const docs = await query
+  const docs = await Station.find(filter)
     .skip((Number(page) - 1) * Number(limit))
     .limit(Number(limit))
     .lean();
@@ -55,12 +71,20 @@ exports.listStations = asyncHandler(async (req, res) => {
   res.json(docs);
 });
 
+/* ============================================================================
+ * Get a station
+ * ==========================================================================*/
 exports.getStation = asyncHandler(async (req, res) => {
   const st = await Station.findById(req.params.id).lean();
   if (!st) throw new HttpError(404, "Station not found");
+
+  assertStaffStationAccess(req, st._id);
   res.json(st);
 });
 
+/* ============================================================================
+ * Update station
+ * ==========================================================================*/
 exports.updateStation = asyncHandler(async (req, res) => {
   const { name, lat, lng, status } = req.body;
   const upd = {};
@@ -76,35 +100,42 @@ exports.updateStation = asyncHandler(async (req, res) => {
   res.json(st);
 });
 
+/* ============================================================================
+ * List stations with assets (chargers + connectors) + pagination + scope
+ * ==========================================================================*/
 exports.listStationsWithAssets = asyncHandler(async (req, res) => {
+  const { stationObjectId } = resolveStaffStationScope(req);
   const { status, page = 1, limit = 20, near, radiusKm = 5 } = req.query;
 
   const filter = {};
+
+  if (stationObjectId) {
+    filter._id = stationObjectId;
+  }
 
   if (status) {
     filter.status = status;
   }
 
-  let query = Station.find(filter);
-
-  // Hỗ trợ tìm kiếm theo vị trí gần
+  // Near search
   if (near) {
     const [lat, lng] = near.split(",").map(Number);
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      query = Station.find({
-        location: {
-          $near: {
-            $geometry: { type: "Point", coordinates: [lng, lat] },
-            $maxDistance: Number(radiusKm) * 1000,
-          },
+      filter.location = {
+        $near: {
+          $geometry: { type: "Point", coordinates: [lng, lat] },
+          $maxDistance: Number(radiusKm) * 1000,
         },
-      });
+      };
     }
   }
 
   // Pagination
   const skip = (Number(page) - 1) * Number(limit);
-  const stations = await query.skip(skip).limit(Number(limit)).lean();
+  const stations = await Station.find(filter)
+    .skip(skip)
+    .limit(Number(limit))
+    .lean();
 
   if (stations.length === 0) {
     return res.json({
@@ -120,19 +151,19 @@ exports.listStationsWithAssets = asyncHandler(async (req, res) => {
 
   const stationIds = stations.map((st) => st._id);
 
-  // Lấy tất cả charger thuộc các trạm này
+  // Chargers in these stations
   const chargers = await Charger.find({
     stationId: { $in: stationIds },
   }).lean();
 
   const chargerIds = chargers.map((charger) => charger._id);
 
-  // Lấy tất cả connector thuộc các charger này
+  // Connectors in these chargers
   const connectors = chargerIds.length
     ? await Connector.find({ chargerId: { $in: chargerIds } }).lean()
     : [];
 
-  // Nhóm connector theo charger
+  // Group connectors by charger
   const connectorsByCharger = connectors.reduce((acc, connector) => {
     const chargerId = connector.chargerId?.toString();
     if (!chargerId) return acc;
@@ -141,7 +172,7 @@ exports.listStationsWithAssets = asyncHandler(async (req, res) => {
     return acc;
   }, {});
 
-  // Nhóm charger theo station và gắn connector
+  // Group chargers by station and attach connectors
   const chargersByStation = chargers.reduce((acc, charger) => {
     const stationId = charger.stationId?.toString();
     if (!stationId) return acc;
@@ -153,11 +184,10 @@ exports.listStationsWithAssets = asyncHandler(async (req, res) => {
     return acc;
   }, {});
 
-  // Tạo kết quả với thông tin chi tiết
+  // Compose result
   const result = stations.map((station) => {
     const stationChargers = chargersByStation[station._id.toString()] || [];
 
-    // Tính tổng số connector và trạng thái
     const totalConnectors = stationChargers.reduce(
       (sum, charger) => sum + charger.connectors.length,
       0
@@ -181,7 +211,7 @@ exports.listStationsWithAssets = asyncHandler(async (req, res) => {
     };
   });
 
-  // Đếm tổng số trạm cho pagination
+  // Count for pagination
   const totalStations = await Station.countDocuments(filter);
   const totalPages = Math.ceil(totalStations / Number(limit));
 
@@ -196,6 +226,9 @@ exports.listStationsWithAssets = asyncHandler(async (req, res) => {
   });
 });
 
+/* ============================================================================
+ * Get one station with assets
+ * ==========================================================================*/
 exports.getStationWithAssets = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
@@ -203,13 +236,15 @@ exports.getStationWithAssets = asyncHandler(async (req, res) => {
     throw new HttpError(400, "Invalid station ID");
   }
 
-  // Lấy thông tin trạm
+  // Station
   const station = await Station.findById(id).lean();
   if (!station) {
     throw new HttpError(404, "Station not found");
   }
 
-  // Lấy tất cả charger thuộc trạm này
+  assertStaffStationAccess(req, station._id);
+
+  // Chargers of this station
   const chargers = await Charger.find({ stationId: id }).lean();
 
   if (chargers.length === 0) {
@@ -219,13 +254,13 @@ exports.getStationWithAssets = asyncHandler(async (req, res) => {
     });
   }
 
-  // Lấy tất cả connector thuộc các charger này
+  // Connectors for those chargers
   const chargerIds = chargers.map((charger) => charger._id);
   const connectors = await Connector.find({
     chargerId: { $in: chargerIds },
   }).lean();
 
-  // Nhóm connector theo charger
+  // Group connectors by charger
   const connectorsByCharger = connectors.reduce((acc, connector) => {
     const chargerId = connector.chargerId?.toString();
     if (!chargerId) return acc;
@@ -234,23 +269,27 @@ exports.getStationWithAssets = asyncHandler(async (req, res) => {
     return acc;
   }, {});
 
-  // Gắn connector vào từng charger
+  // Attach connectors into chargers
   const chargersWithConnectors = chargers.map((charger) => ({
     ...charger,
     connectors: connectorsByCharger[charger._id.toString()] || [],
   }));
 
-  // Trả về kết quả
   res.json({
     ...station,
     chargers: chargersWithConnectors,
   });
 });
 
+/* ============================================================================
+ * List compatible stations for a vehicle (respect staff scope)
+ * ==========================================================================*/
 exports.listCompatibleStationsForVehicle = asyncHandler(async (req, res) => {
   const userId = ensureRequestUserId(req);
 
   const { vehicleId, connectorStatus, stationStatus } = req.query;
+
+  const { stationObjectId } = resolveStaffStationScope(req);
 
   const vehicleFilter = {
     user_id: userId,
@@ -307,6 +346,7 @@ exports.listCompatibleStationsForVehicle = asyncHandler(async (req, res) => {
   }
 
   const connectorFilter = { type: { $in: connectorTypes } };
+  if (stationObjectId) connectorFilter.stationId = stationObjectId;
   if (connectorStatus) connectorFilter.status = connectorStatus;
 
   const connectors = await Connector.find(connectorFilter).lean();
@@ -330,6 +370,9 @@ exports.listCompatibleStationsForVehicle = asyncHandler(async (req, res) => {
   }
 
   const stationFilter = { _id: { $in: stationObjectIds } };
+  if (stationObjectId) {
+    stationFilter._id = stationObjectId;
+  }
   if (stationStatus) stationFilter.status = stationStatus;
 
   const stations = await Station.find(stationFilter).lean();
@@ -435,6 +478,9 @@ exports.listCompatibleStationsForVehicle = asyncHandler(async (req, res) => {
   sendResponse(stationsPayload);
 });
 
+/* ============================================================================
+ * Delete station
+ * ==========================================================================*/
 exports.deleteStation = asyncHandler(async (req, res) => {
   const done = await Station.findByIdAndDelete(req.params.id);
   if (!done) throw new HttpError(404, "Station not found");

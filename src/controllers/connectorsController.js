@@ -1,3 +1,6 @@
+// src/controllers/connectorsController.js
+const mongoose = require("mongoose");
+
 const Connector = require("../models/Connector");
 const Station = require("../models/Station");
 const Charger = require("../models/Charger");
@@ -7,6 +10,10 @@ const User = require("../models/User");
 const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
 const { ensureRequestUserId } = require("../utils/requestUser");
+const {
+  resolveStaffStationScope,
+  assertStaffStationAccess,
+} = require("../utils/stationScope");
 const {
   MAX_CONNECTORS_PER_CHARGER,
   BOOKING_SLOT_MINUTES,
@@ -25,6 +32,8 @@ exports.createConnector = asyncHandler(async (req, res) => {
   if (!charger) {
     throw new HttpError(400, "Invalid chargerId");
   }
+
+  assertStaffStationAccess(req, charger.stationId);
 
   if (!charger.connectorType) {
     throw new HttpError(409, "Charger is missing connector type configuration");
@@ -61,11 +70,36 @@ exports.createConnector = asyncHandler(async (req, res) => {
   res.status(201).json(payload);
 });
 
+const toObjectId = (value) => {
+  if (!value) return null;
+  if (mongoose.Types.ObjectId.isValid(value)) {
+    return new mongoose.Types.ObjectId(value);
+  }
+  return null;
+};
+
 exports.listConnectors = asyncHandler(async (req, res) => {
+  const { stationObjectId } = resolveStaffStationScope(req);
   const { stationId, chargerId, status, page = 1, limit = 20 } = req.query;
   const q = {};
-  if (stationId) q.stationId = stationId;
-  if (chargerId) q.chargerId = chargerId;
+
+  if (stationObjectId) {
+    q.stationId = stationObjectId;
+  } else if (stationId) {
+    const normalizedStationId = toObjectId(stationId);
+    if (!normalizedStationId) {
+      throw new HttpError(400, "Invalid stationId");
+    }
+    q.stationId = normalizedStationId;
+  }
+
+  if (chargerId) {
+    const normalizedChargerId = toObjectId(chargerId);
+    if (!normalizedChargerId) {
+      throw new HttpError(400, "Invalid chargerId");
+    }
+    q.chargerId = normalizedChargerId;
+  }
   if (status) q.status = status;
 
   const docs = await Connector.find(q)
@@ -79,6 +113,8 @@ exports.listConnectors = asyncHandler(async (req, res) => {
 exports.getConnector = asyncHandler(async (req, res) => {
   const doc = await Connector.findById(req.params.id).lean();
   if (!doc) throw new HttpError(404, "Connector not found");
+
+  assertStaffStationAccess(req, doc.stationId);
   res.json(doc);
 });
 
@@ -86,6 +122,8 @@ exports.updateConnector = asyncHandler(async (req, res) => {
   const { code } = req.body;
   const connector = await Connector.findById(req.params.id);
   if (!connector) throw new HttpError(404, "Connector not found");
+
+  assertStaffStationAccess(req, connector.stationId);
 
   if (code !== undefined) connector.code = code;
   if (!connector.qrToken && connector.code) connector.qrToken = connector.code;
@@ -120,6 +158,8 @@ exports.patchConnectorStatus = asyncHandler(async (req, res) => {
   const doc = await Connector.findById(req.params.id);
   if (!doc) throw new HttpError(404, "Connector not found");
 
+  assertStaffStationAccess(req, doc.stationId);
+
   if (status === "OFFLINE" && doc.status === "CHARGING") {
     throw new HttpError(
       409,
@@ -134,8 +174,12 @@ exports.patchConnectorStatus = asyncHandler(async (req, res) => {
 });
 
 exports.deleteConnector = asyncHandler(async (req, res) => {
-  const done = await Connector.findByIdAndDelete(req.params.id);
-  if (!done) throw new HttpError(404, "Connector not found");
+  const doc = await Connector.findById(req.params.id).select("_id stationId");
+  if (!doc) throw new HttpError(404, "Connector not found");
+
+  assertStaffStationAccess(req, doc.stationId);
+
+  await Connector.deleteOne({ _id: doc._id });
   res.json({ ok: true });
 });
 
@@ -144,8 +188,8 @@ const toPlain = (doc) =>
   typeof doc?.toObject === "function"
     ? doc.toObject()
     : typeof doc?.toJSON === "function"
-      ? doc.toJSON()
-      : doc;
+    ? doc.toJSON()
+    : doc;
 
 const buildQrPayload = (token) => {
   if (!token) return null;
@@ -249,6 +293,11 @@ exports.getConnectorScanDetails = asyncHandler(async (req, res) => {
     .lean();
   if (!connector) throw new HttpError(404, "Connector not found");
 
+  assertStaffStationAccess(
+    req,
+    connector.stationId?._id || connector.stationId
+  );
+
   let bookingPayload = null;
   let userPayload = null;
 
@@ -286,10 +335,10 @@ exports.getConnectorScanDetails = asyncHandler(async (req, res) => {
     const estimatedFinishAt = finishAtFromSession
       ? finishAtFromSession
       : booking.slotStart
-        ? new Date(
-            new Date(booking.slotStart).getTime() + estimatedMinutes * 60000
-          )
-        : null;
+      ? new Date(
+          new Date(booking.slotStart).getTime() + estimatedMinutes * 60000
+        )
+      : null;
 
     const now = new Date();
     let estimatedRemainingMinutes = null;
@@ -301,7 +350,7 @@ exports.getConnectorScanDetails = asyncHandler(async (req, res) => {
     }
 
     const canStartNow =
-      booking.status === "RESERVED" &&
+      booking.status === BOOKING_STATUS.RESERVED &&
       now >= new Date(booking.slotStart) &&
       now <= new Date(booking.checkInDeadline);
 

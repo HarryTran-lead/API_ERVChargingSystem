@@ -1,3 +1,6 @@
+// src/controllers/chargersController.js
+const mongoose = require("mongoose");
+
 const Charger = require("../models/Charger");
 const Station = require("../models/Station");
 const Booking = require("../models/Booking");
@@ -15,12 +18,40 @@ const {
   formatSessionDates,
 } = require("../utils/timezoneHelpers");
 
+// ===== Station scope (soft import; no-op if utils/stationScope not present) =====
+let resolveStaffStationScope = () => ({});
+let assertStaffStationAccess = () => {};
+try {
+  const scope = require("../utils/stationScope");
+  if (typeof scope.resolveStaffStationScope === "function") {
+    resolveStaffStationScope = scope.resolveStaffStationScope;
+  }
+  if (typeof scope.assertStaffStationAccess === "function") {
+    assertStaffStationAccess = scope.assertStaffStationAccess;
+  }
+} catch {
+  // keep no-op for backward compatibility
+}
+
+// ===== Compatibility flags (ENV) =====
+const STRICT_ID =
+  String(process.env.STATION_SCOPE_STRICT_ID || "false") === "true";
+const KEEP_OLD_CHARGER_UPDATE =
+  String(process.env.KEEP_OLD_CHARGER_UPDATE || "false") === "true";
+
+/* ============================================================================
+ * Create
+ * ==========================================================================*/
 exports.createCharger = asyncHandler(async (req, res) => {
   const { stationId, name, code, status, connectorType, powerKw } = req.body;
+
   const station = await Station.findById(stationId).select("_id").lean();
   if (!station) {
     throw new HttpError(400, "Invalid stationId");
   }
+
+  // scope guard (no-op if not enabled)
+  assertStaffStationAccess(req, station._id);
 
   const charger = await Charger.create({
     stationId,
@@ -34,10 +65,28 @@ exports.createCharger = asyncHandler(async (req, res) => {
   res.status(201).json(charger);
 });
 
+/* ============================================================================
+ * List (with optional station scope)
+ * ==========================================================================*/
 exports.listChargers = asyncHandler(async (req, res) => {
+  const { stationObjectId } = resolveStaffStationScope(req);
   const { stationId, status, page = 1, limit = 20 } = req.query;
+
   const q = {};
-  if (stationId) q.stationId = stationId;
+
+  if (stationObjectId) {
+    q.stationId = stationObjectId;
+  } else if (stationId) {
+    if (mongoose.Types.ObjectId.isValid(stationId)) {
+      q.stationId = new mongoose.Types.ObjectId(stationId);
+    } else if (STRICT_ID) {
+      throw new HttpError(400, "Invalid stationId");
+    } else {
+      // Legacy allowance: if historical data used string stationId
+      q.stationId = stationId;
+    }
+  }
+
   if (status) q.status = status;
 
   const chargers = await Charger.find(q)
@@ -45,65 +94,98 @@ exports.listChargers = asyncHandler(async (req, res) => {
     .limit(Number(limit))
     .lean();
 
-  // Lấy tất cả connectors cho các chargers
-  const chargerIds = chargers.map((charger) => charger._id);
+  // Attach connectors
+  const chargerIds = chargers.map((c) => c._id);
   const connectors = await Connector.find({
     chargerId: { $in: chargerIds },
   }).lean();
 
-  // Nhóm connectors theo chargerId
   const connectorsByCharger = {};
-  connectors.forEach((connector) => {
-    const chargerId = connector.chargerId.toString();
-    if (!connectorsByCharger[chargerId]) {
-      connectorsByCharger[chargerId] = [];
-    }
-    connectorsByCharger[chargerId].push(connector);
-  });
+  for (const conn of connectors) {
+    const key = conn.chargerId.toString();
+    if (!connectorsByCharger[key]) connectorsByCharger[key] = [];
+    connectorsByCharger[key].push(conn);
+  }
 
-  // Thêm connectors vào mỗi charger
-  const chargersWithConnectors = chargers.map((charger) => ({
+  const result = chargers.map((charger) => ({
     ...charger,
     connectors: connectorsByCharger[charger._id.toString()] || [],
   }));
 
-  res.json(chargersWithConnectors);
+  res.json(result);
 });
 
+/* ============================================================================
+ * Get by id (+ connectors)
+ * ==========================================================================*/
 exports.getCharger = asyncHandler(async (req, res) => {
   const charger = await Charger.findById(req.params.id).lean();
   if (!charger) {
     throw new HttpError(404, "Charger not found");
   }
 
-  // Lấy tất cả connectors của charger này
+  // scope guard
+  assertStaffStationAccess(req, charger.stationId);
+
   const connectors = await Connector.find({ chargerId: charger._id }).lean();
 
-  // Thêm connectors vào charger
-  const chargerWithConnectors = {
+  res.json({
     ...charger,
-    connectors: connectors,
-  };
-
-  res.json(chargerWithConnectors);
+    connectors,
+  });
 });
 
+/* ============================================================================
+ * Update
+ * - Compat mode: KEEP_OLD_CHARGER_UPDATE=true => use findByIdAndUpdate (legacy)
+ * - New mode: load + modify + save (triggers hooks/validators)
+ * ==========================================================================*/
 exports.updateCharger = asyncHandler(async (req, res) => {
   const { name, code, status, connectorType, powerKw } = req.body;
-  const updates = {};
-  if (name !== undefined) updates.name = name;
-  if (code !== undefined) updates.code = code;
-  if (status !== undefined) updates.status = status;
-  if (connectorType !== undefined) updates.connectorType = connectorType;
-  if (powerKw !== undefined) updates.powerKw = powerKw;
 
-  const charger = await Charger.findByIdAndUpdate(req.params.id, updates, {
-    new: true,
-  });
+  if (KEEP_OLD_CHARGER_UPDATE) {
+    const updates = {};
+    if (name !== undefined) updates.name = name;
+    if (code !== undefined) updates.code = code;
+    if (status !== undefined) updates.status = status;
+    if (connectorType !== undefined) updates.connectorType = connectorType;
+    if (powerKw !== undefined) updates.powerKw = powerKw;
 
-  if (!charger) {
-    throw new HttpError(404, "Charger not found");
+    const charger = await Charger.findByIdAndUpdate(req.params.id, updates, {
+      new: true,
+      runValidators: true,
+      context: "query",
+    });
+
+    if (!charger) {
+      throw new HttpError(404, "Charger not found");
+    }
+
+    const connectorUpdates = {};
+    if (connectorType !== undefined)
+      connectorUpdates.type = charger.connectorType;
+    if (powerKw !== undefined) connectorUpdates.powerKw = charger.powerKw;
+    if (Object.keys(connectorUpdates).length > 0) {
+      await Connector.updateMany({ chargerId: charger._id }, connectorUpdates);
+    }
+
+    res.json(charger);
+    return;
   }
+
+  // New behavior: enforce scope and trigger hooks via .save()
+  const charger = await Charger.findById(req.params.id);
+  if (!charger) throw new HttpError(404, "Charger not found");
+
+  assertStaffStationAccess(req, charger.stationId);
+
+  if (name !== undefined) charger.name = name;
+  if (code !== undefined) charger.code = code;
+  if (status !== undefined) charger.status = status;
+  if (connectorType !== undefined) charger.connectorType = connectorType;
+  if (powerKw !== undefined) charger.powerKw = powerKw;
+
+  await charger.save();
 
   const connectorUpdates = {};
   if (connectorType !== undefined)
@@ -113,38 +195,44 @@ exports.updateCharger = asyncHandler(async (req, res) => {
     await Connector.updateMany({ chargerId: charger._id }, connectorUpdates);
   }
 
-  res.json(charger);
+  res.json(charger.toObject ? charger.toObject() : charger);
 });
 
+/* ============================================================================
+ * Delete (guard: no connectors; scope check)
+ * ==========================================================================*/
 exports.deleteCharger = asyncHandler(async (req, res) => {
-  const connectorCount = await Connector.countDocuments({
-    chargerId: req.params.id,
-  });
+  const charger = await Charger.findById(req.params.id).select("_id stationId");
+  if (!charger) {
+    throw new HttpError(404, "Charger not found");
+  }
 
+  assertStaffStationAccess(req, charger.stationId);
+
+  const connectorCount = await Connector.countDocuments({
+    chargerId: charger._id,
+  });
   if (connectorCount > 0) {
     throw new HttpError(409, "Cannot delete charger with existing connectors");
   }
 
-  const deleted = await Charger.findByIdAndDelete(req.params.id);
-  if (!deleted) {
-    throw new HttpError(404, "Charger not found");
-  }
+  await Charger.deleteOne({ _id: charger._id });
 
   res.json({ ok: true });
 });
 
+/* ============================================================================
+ * Helpers for scan details
+ * ==========================================================================*/
 const toPlain = (doc) =>
   typeof doc?.toObject === "function"
     ? doc.toObject()
     : typeof doc?.toJSON === "function"
-      ? doc.toJSON()
-      : doc;
+    ? doc.toJSON()
+    : doc;
 
 const buildQrPayload = (token) => {
-  if (!token) {
-    return null;
-  }
-
+  if (!token) return null;
   const payload = { token };
   const baseUrl =
     process.env.CHARGER_QR_BASE_URL || process.env.CONNECTOR_QR_BASE_URL;
@@ -156,12 +244,8 @@ const buildQrPayload = (token) => {
 };
 
 const formatSessionForScan = (sessionDoc) => {
-  if (!sessionDoc) {
-    return null;
-  }
-
+  if (!sessionDoc) return null;
   const session = formatSessionDates(toPlain(sessionDoc));
-
   return {
     id: session._id?.toString(),
     ref: session.id,
@@ -184,10 +268,8 @@ const computeEstimatedChargeMinutes = (booking, session) => {
   if (session?.chargeDurationMinutes) {
     return session.chargeDurationMinutes;
   }
-
   const start = booking?.slotStart ? new Date(booking.slotStart) : null;
   const end = booking?.slotEnd ? new Date(booking.slotEnd) : null;
-
   if (
     start &&
     end &&
@@ -195,11 +277,8 @@ const computeEstimatedChargeMinutes = (booking, session) => {
     !Number.isNaN(end.getTime())
   ) {
     const minutes = Math.round((end.getTime() - start.getTime()) / 60000);
-    if (minutes > 0) {
-      return minutes;
-    }
+    if (minutes > 0) return minutes;
   }
-
   return BOOKING_SLOT_MINUTES;
 };
 
@@ -257,6 +336,9 @@ const formatChargerForScan = (chargerDoc) => {
   };
 };
 
+/* ============================================================================
+ * Scan details by QR token
+ * ==========================================================================*/
 exports.getChargerScanDetails = asyncHandler(async (req, res) => {
   const { token } = req.params;
   if (!token) {
@@ -309,6 +391,7 @@ exports.getChargerScanDetails = asyncHandler(async (req, res) => {
       const session = await Session.findOne({ bookingId: booking._id }).lean();
 
       const estimatedMinutes = computeEstimatedChargeMinutes(booking, session);
+
       let finishAtFromSession = null;
       if (session?.expectedFullAt) {
         const parsed = new Date(session.expectedFullAt);
@@ -320,10 +403,10 @@ exports.getChargerScanDetails = asyncHandler(async (req, res) => {
       const estimatedFinishAt = finishAtFromSession
         ? finishAtFromSession
         : booking.slotStart
-          ? new Date(
-              new Date(booking.slotStart).getTime() + estimatedMinutes * 60000
-            )
-          : null;
+        ? new Date(
+            new Date(booking.slotStart).getTime() + estimatedMinutes * 60000
+          )
+        : null;
 
       const now = new Date();
       let estimatedRemainingMinutes = null;
