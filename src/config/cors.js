@@ -6,7 +6,7 @@ const corsOptions = {
     "http://localhost:5173", // Thay đổi theo domain front-end
     // Thêm các domain khác nếu cần
   ],
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true,
 };
 
