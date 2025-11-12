@@ -1,5 +1,7 @@
 // controllers/analyticsController.js
 
+const mongoose = require('mongoose');
+
 const Session = require('../models/Session');
 const Invoice = require('../models/Invoice');
 const Station = require('../models/Station');
@@ -20,6 +22,7 @@ const {
 
 const { ensureRequestUserId } = require('../utils/requestUser');
 const asyncHandler = require('../utils/asyncHandler');
+const { HttpError } = require('../utils/errors');
 
 /* ======================== Helpers gốc ======================== */
 const toArray = (v) =>
@@ -375,11 +378,28 @@ exports.getMyChargingHabits = asyncHandler(async (req, res) => {
 });
 
 /* ========== GET /api/v1/analytics/admin/overview
-      ?range=1d|7d|1m|3m|6m|12m&year=YYYY&end=ISO ========== */
+      ?range=1d|7d|1m|3m|6m|12m&year=YYYY&end=ISO&stationId=ID ========== */
 exports.getAdminOverview = asyncHandler(async (req, res) => {
   // --- đọc tham số ---
-  const { range, year, end } = req.query;
+  const { range, year, end, stationId } = req.query;
   const { from, to, unit, rangeKey } = resolveWindow(range, year, end);
+
+  // Chuẩn hóa & validate stationId: 'all' => bỏ lọc; còn lại phải là ObjectId hợp lệ
+  const rawStationId = Array.isArray(stationId) ? stationId[0] : stationId;
+  const trimmedStationId =
+    typeof rawStationId === 'string' ? rawStationId.trim() : rawStationId;
+
+  let stationObjectId = null;
+  if (trimmedStationId) {
+    const stationIdLower =
+      typeof trimmedStationId === 'string' ? trimmedStationId.toLowerCase() : trimmedStationId;
+    if (stationIdLower !== 'all') {
+      if (!mongoose.Types.ObjectId.isValid(trimmedStationId)) {
+        throw new HttpError(400, 'Invalid stationId');
+      }
+      stationObjectId = new mongoose.Types.ObjectId(trimmedStationId);
+    }
+  }
 
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -406,63 +426,72 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
     },
   ]);
 
-  const stationStatusPromise = Station.aggregate([
-    { $group: { _id: '$status', count: { $sum: 1 } } },
-  ]);
+  const stationStatusPipeline = [];
+  if (stationObjectId) {
+    stationStatusPipeline.push({ $match: { _id: stationObjectId } });
+  }
+  stationStatusPipeline.push({ $group: { _id: '$status', count: { $sum: 1 } } });
+  const stationStatusPromise = Station.aggregate(stationStatusPipeline);
 
-  const connectorStatsPromise = Connector.aggregate([
-    {
-      $facet: {
-        byStatus: [
-          {
-            $group: {
-              _id: '$status',
-              count: { $sum: 1 },
-              totalPowerKw: { $sum: { $ifNull: ['$powerKw', 0] } },
-            },
+  const connectorStatsPipeline = [];
+  if (stationObjectId) {
+    connectorStatsPipeline.push({ $match: { stationId: stationObjectId } });
+  }
+  connectorStatsPipeline.push({
+    $facet: {
+      byStatus: [
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+            totalPowerKw: { $sum: { $ifNull: ['$powerKw', 0] } },
           },
-        ],
-        byType: [
-          {
-            $group: {
-              _id: '$type',
-              count: { $sum: 1 },
-              totalPowerKw: { $sum: { $ifNull: ['$powerKw', 0] } },
-            },
+        },
+      ],
+      byType: [
+        {
+          $group: {
+            _id: '$type',
+            count: { $sum: 1 },
+            totalPowerKw: { $sum: { $ifNull: ['$powerKw', 0] } },
           },
-        ],
-      },
+        },
+      ],
     },
-  ]);
+  });
+  const connectorStatsPromise = Connector.aggregate(connectorStatsPipeline);
 
-  const bookingStatsPromise = Booking.aggregate([
-    {
-      $facet: {
-        byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
-        upcoming: [
-          {
-            $match: {
-              slotStart: { $gte: now },
-              status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
-            },
+  const bookingStatsPipeline = [];
+  if (stationObjectId) {
+    bookingStatsPipeline.push({ $match: { stationId: stationObjectId } });
+  }
+  bookingStatsPipeline.push({
+    $facet: {
+      byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+      upcoming: [
+        {
+          $match: {
+            slotStart: { $gte: now },
+            status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
           },
-          { $count: 'count' },
-        ],
-        today: [
-          {
-            $match: {
-              slotStart: { $gte: startOfToday, $lt: endOfToday },
-            },
+        },
+        { $count: 'count' },
+      ],
+      today: [
+        {
+          $match: {
+            slotStart: { $gte: startOfToday, $lt: endOfToday },
           },
-          { $count: 'count' },
-        ],
-        inRange: [
-          { $match: { slotStart: { $gte: from, $lt: to } } },
-          { $count: 'count' },
-        ],
-      },
+        },
+        { $count: 'count' },
+      ],
+      inRange: [
+        { $match: { slotStart: { $gte: from, $lt: to } } },
+        { $count: 'count' },
+      ],
     },
-  ]);
+  });
+  const bookingStatsPromise = Booking.aggregate(bookingStatsPipeline);
 
   // --- session facets phụ thuộc range & series ---
   const sessionSeriesGroup =
@@ -487,76 +516,79 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
           sessions: { $sum: 1 },
         };
 
-  const sessionStatsPromise = Session.aggregate([
-    {
-      $facet: {
-        byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
-        active: [
-          {
-            $match: {
-              status: { $in: [SESSION_STATUS.PENDING, SESSION_STATUS.CHARGING] },
-            },
+  const sessionStatsPipeline = [];
+  if (stationObjectId) {
+    sessionStatsPipeline.push({ $match: { stationId: stationObjectId } });
+  }
+  sessionStatsPipeline.push({
+    $facet: {
+      byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+      active: [
+        {
+          $match: {
+            status: { $in: [SESSION_STATUS.PENDING, SESSION_STATUS.CHARGING] },
           },
-          { $count: 'count' },
-        ],
-        lifetime: [
-          { $match: { status: SESSION_STATUS.COMPLETED } },
-          {
-            $group: {
-              _id: null,
-              revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
-              energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
-              sessions: { $sum: 1 },
-            },
+        },
+        { $count: 'count' },
+      ],
+      lifetime: [
+        { $match: { status: SESSION_STATUS.COMPLETED } },
+        {
+          $group: {
+            _id: null,
+            revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
+            energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+            sessions: { $sum: 1 },
           },
-        ],
-        selectedRange: [
-          {
-            $match: {
-              status: SESSION_STATUS.COMPLETED,
-              createdAt: { $gte: from, $lt: to },
-            },
+        },
+      ],
+      selectedRange: [
+        {
+          $match: {
+            status: SESSION_STATUS.COMPLETED,
+            createdAt: { $gte: from, $lt: to },
           },
-          {
-            $group: {
-              _id: null,
-              revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
-              energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
-              sessions: { $sum: 1 },
-            },
+        },
+        {
+          $group: {
+            _id: null,
+            revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
+            energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+            sessions: { $sum: 1 },
           },
-        ],
-        series: [
-          {
-            $match: {
-              status: SESSION_STATUS.COMPLETED,
-              createdAt: { $gte: from, $lt: to },
-            },
+        },
+      ],
+      series: [
+        {
+          $match: {
+            status: SESSION_STATUS.COMPLETED,
+            createdAt: { $gte: from, $lt: to },
           },
-          { $group: sessionSeriesGroup },
-          { $sort: { '_id.y': 1, '_id.m': 1, ...(unit === 'day' ? { '_id.d': 1 } : {}) } },
-        ],
-        topStations: [
-          {
-            $match: {
-              status: SESSION_STATUS.COMPLETED,
-              createdAt: { $gte: from, $lt: to },
-            },
+        },
+        { $group: sessionSeriesGroup },
+        { $sort: { '_id.y': 1, '_id.m': 1, ...(unit === 'day' ? { '_id.d': 1 } : {}) } },
+      ],
+      topStations: [
+        {
+          $match: {
+            status: SESSION_STATUS.COMPLETED,
+            createdAt: { $gte: from, $lt: to },
           },
-          {
-            $group: {
-              _id: '$stationId',
-              revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
-              energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
-              sessions: { $sum: 1 },
-            },
+        },
+        {
+          $group: {
+            _id: '$stationId',
+            revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
+            energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+            sessions: { $sum: 1 },
           },
-          { $sort: { revenue: -1 } },
-          { $limit: 5 },
-        ],
-      },
+        },
+        { $sort: { revenue: -1 } },
+        { $limit: 5 },
+      ],
     },
-  ]);
+  });
+  const sessionStatsPromise = Session.aggregate(sessionStatsPipeline);
 
   // --- invoice facets phụ thuộc range & series ---
   const invoiceSeriesGroup =
@@ -572,39 +604,52 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
           currency: { $first: { $ifNull: ['$currency', 'VND'] } },
         };
 
-  const invoiceStatsPromise = Invoice.aggregate([
-    { $match: { status: 'ISSUED' } },
-    {
-      $facet: {
-        lifetime: [
-          {
-            $group: {
-              _id: null,
-              total: { $sum: { $ifNull: ['$total', 0] } },
-              count: { $sum: 1 },
-              currency: { $first: { $ifNull: ['$currency', 'VND'] } },
-            },
-          },
-        ],
-        selectedRange: [
-          { $match: { createdAt: { $gte: from, $lt: to } } },
-          {
-            $group: {
-              _id: null,
-              total: { $sum: { $ifNull: ['$total', 0] } },
-              count: { $sum: 1 },
-              currency: { $first: { $ifNull: ['$currency', 'VND'] } },
-            },
-          },
-        ],
-        series: [
-          { $match: { createdAt: { $gte: from, $lt: to } } },
-          { $group: invoiceSeriesGroup },
-          { $sort: { '_id.y': 1, '_id.m': 1, ...(unit === 'day' ? { '_id.d': 1 } : {}) } },
-        ],
+  const invoiceStatsPipeline = [{ $match: { status: 'ISSUED' } }];
+  if (stationObjectId) {
+    // Lọc hóa đơn theo trạm qua session tương ứng
+    invoiceStatsPipeline.push({
+      $lookup: {
+        from: 'sessions',
+        localField: 'session_id', // lưu ý: trường liên kết
+        foreignField: 'id',       // session "id" (không phải _id) trong hệ thống
+        as: 'sessionDoc',
       },
+    });
+    invoiceStatsPipeline.push({ $unwind: '$sessionDoc' });
+    invoiceStatsPipeline.push({ $match: { 'sessionDoc.stationId': stationObjectId } });
+    invoiceStatsPipeline.push({ $project: { sessionDoc: 0 } });
+  }
+  invoiceStatsPipeline.push({
+    $facet: {
+      lifetime: [
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $ifNull: ['$total', 0] } },
+            count: { $sum: 1 },
+            currency: { $first: { $ifNull: ['$currency', 'VND'] } },
+          },
+        },
+      ],
+      selectedRange: [
+        { $match: { createdAt: { $gte: from, $lt: to } } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $ifNull: ['$total', 0] } },
+            count: { $sum: 1 },
+            currency: { $first: { $ifNull: ['$currency', 'VND'] } },
+          },
+        },
+      ],
+      series: [
+        { $match: { createdAt: { $gte: from, $lt: to } } },
+        { $group: invoiceSeriesGroup },
+        { $sort: { '_id.y': 1, '_id.m': 1, ...(unit === 'day' ? { '_id.d': 1 } : {}) } },
+      ],
     },
-  ]);
+  });
+  const invoiceStatsPromise = Invoice.aggregate(invoiceStatsPipeline);
 
   // --- feedback facets phụ thuộc range ---
   const feedbackStatsPromise = Feedback.aggregate([
