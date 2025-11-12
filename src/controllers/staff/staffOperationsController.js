@@ -966,12 +966,12 @@ exports.updateIncidentStatus = asyncHandler(async (req, res) => {
   if (!allowedStatuses.includes(normalizedStatus)) {
     throw new HttpError(403, 'You are not allowed to set this status');
   }
-  const scopedQuery = stationObjectId ? { $and: [query, { stationId: stationObjectId }] } : query;
-
   const query = buildIncidentQuery(incidentId);
   if (!query) {
     throw new HttpError(400, 'Invalid incident identifier');
   }
+
+  const scopedQuery = stationObjectId ? { $and: [query, { stationId: stationObjectId }] } : query;
 
   const updates = { status: normalizedStatus };
 

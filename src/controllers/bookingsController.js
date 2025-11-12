@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const Connector = require('../models/Connector');
 const Vehicle = require('../models/Vehicle');
+const Wallet = require("../models/Wallet");
 const Station = require('../models/Station');
 const Tariff = require('../models/Tariff');
 const Session = require('../models/Session');
@@ -15,7 +16,11 @@ const {
   ensureRequestUserId,
   ensureRequestUser,
 } = require("../utils/requestUser");
-const { BOOKING_SLOT_MINUTES, BOOKING_GRACE_MINUTES } = require('../constants/business');
+const {
+  BOOKING_SLOT_MINUTES,
+  BOOKING_GRACE_MINUTES,
+  SESSION_MIN_BALANCE_BASE_VND,
+} = require("../constants/business");
 const { BOOKING_STATUS, SESSION_STATUS, PAYMENT_METHODS, ROLES } = require('../constants/enums'); // NEW PAYMENT_METHODS
 const { scheduleNoShowJob, cancelNoShowJob } = require('../services/bookingScheduler');
 const bookingMonitor = require('../services/bookingMonitor');
@@ -274,6 +279,16 @@ exports.createBooking = asyncHandler(async (req, res) => {
     throw new HttpError(400, 'MUST_USE_DEFAULT_VEHICLE: You can only book with your default vehicle.');
   }
 
+  const wallet = await Wallet.findOne({ user_id: userId }).lean();
+
+  if (!wallet || wallet.balance <= SESSION_MIN_BALANCE_BASE_VND) {
+    const formattedMin = SESSION_MIN_BALANCE_BASE_VND.toLocaleString("vi-VN");
+    throw new HttpError(
+      402,
+      `WALLET_MIN_BALANCE_REQUIRED: Your wallet must have a balance above ${formattedMin} VND to create a booking.`
+    );
+  }
+
   // Kiểm tra user có booking đang active không (trừ slot liên tiếp)
   const userActiveBookings = await Booking.find({
     userId,
@@ -300,60 +315,123 @@ exports.createBooking = asyncHandler(async (req, res) => {
     }
   }
 
-  // Giới hạn 3 slot/ngày
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
+  // // Giới hạn 3 slot/ngày
+  // const today = new Date();
+  // today.setHours(0, 0, 0, 0);
+  // const tomorrow = new Date(today);
+  // tomorrow.setDate(tomorrow.getDate() + 1);
 
-  const todayBookings = await Booking.countDocuments({
-    userId,
-    slotStart: { $gte: today, $lt: tomorrow },
-    status: { $ne: BOOKING_STATUS.CANCELLED },
-  });
+  // const todayBookings = await Booking.countDocuments({
+  //   userId,
+  //   slotStart: { $gte: today, $lt: tomorrow },
+  //   status: { $ne: BOOKING_STATUS.CANCELLED },
+  // });
 
-  if (todayBookings >= 3) {
-    throw new HttpError(429, 'Daily limit reached. You can only book 3 slots per day.');
-  }
+  // if (todayBookings >= 3) {
+  //   throw new HttpError(429, 'Daily limit reached. You can only book 3 slots per day.');
+  // }
 
   const slotEnd = new Date(normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60 * 1000);
   const checkInDeadline = new Date(normalizedStart.getTime() + BOOKING_GRACE_MINUTES * 60 * 1000);
 
-  // Chống đặt chồng lấp trên cùng connector
-  const overlapping = await Booking.findOne({
-    connectorId,
-    status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
-    slotStart: { $lt: slotEnd },
-    slotEnd: { $gt: normalizedStart },
-  }).lean();
+  // // Chống đặt chồng lấp trên cùng connector
+  // const overlapping = await Booking.findOne({
+  //   connectorId,
+  //   status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
+  //   slotStart: { $lt: slotEnd },
+  //   slotEnd: { $gt: normalizedStart },
+  // }).lean();
 
-  if (overlapping) {
-    const overlapMinutes = Math.round(
-      toMinutes(
-        Math.min(new Date(overlapping.slotEnd).getTime(), slotEnd.getTime()) -
-          Math.max(new Date(overlapping.slotStart).getTime(), normalizedStart.getTime())
-      )
-    );
-    throw new HttpError(
-      409,
-      `Connector already reserved for the selected slot (overlap ${overlapMinutes} minutes)`
-    );
-  }
+  // if (overlapping) {
+  //   const overlapMinutes = Math.round(
+  //     toMinutes(
+  //       Math.min(new Date(overlapping.slotEnd).getTime(), slotEnd.getTime()) -
+  //         Math.max(new Date(overlapping.slotStart).getTime(), normalizedStart.getTime())
+  //     )
+  //   );
+  //   throw new HttpError(
+  //     409,
+  //     `Connector already reserved for the selected slot (overlap ${overlapMinutes} minutes)`
+  //   );
+  // }
 
   const vehicleSnapshot = vehicleSnapshotFromDoc(defaultVehicle);
 
   let connectorDoc;
+  let shouldReleaseConnector = false;
+  let releaseStatus = null;
   try {
-    // Reserve connector nếu đang IDLE
-    connectorDoc = await Connector.findOneAndUpdate(
-      { _id: connectorId, status: 'IDLE' },
-      { $set: { status: 'RESERVED' } },
-      { new: true }
-    );
+    // // Reserve connector nếu đang IDLE
+    // connectorDoc = await Connector.findOneAndUpdate(
+    //   { _id: connectorId, status: 'IDLE' },
+    //   { $set: { status: 'RESERVED' } },
+    //   { new: true }
+    // );
+    connectorDoc = await Connector.findById(connectorId);
 
     if (!connectorDoc) {
-      throw new HttpError(409, 'Connector is not available for booking');
+      throw new HttpError(404, "Connector not found");
     }
+
+    if (connectorDoc.status === "OFFLINE") {
+      throw new HttpError(409, "Connector is offline");
+    }
+
+    if (["IDLE", "FINISHED"].includes(connectorDoc.status)) {
+      const updated = await Connector.findOneAndUpdate(
+        { _id: connectorId, status: connectorDoc.status },
+        { $set: { status: "RESERVED" } },
+        { new: true }
+      );
+
+      if (updated) {
+        releaseStatus = connectorDoc.status;
+        shouldReleaseConnector = true;
+        connectorDoc = updated;
+      } else {
+        connectorDoc = await Connector.findById(connectorId);
+        if (!connectorDoc) {
+          throw new HttpError(404, "Connector not found");
+        }
+        if (connectorDoc.status === "OFFLINE") {
+          throw new HttpError(409, "Connector is offline");
+        }
+      }
+    } else if (!["RESERVED", "CHARGING"].includes(connectorDoc.status)) {
+      throw new HttpError(409, "Connector is not available for booking");
+    }
+    
+    const overlapping = await Booking.findOne({
+      connectorId,
+      status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
+      slotStart: { $lt: slotEnd },
+      slotEnd: { $gt: normalizedStart },
+    }).lean();
+
+    if (overlapping) {
+      if (shouldReleaseConnector && connectorDoc.status === "RESERVED") {
+        await Connector.findOneAndUpdate(
+          { _id: connectorDoc._id, status: "RESERVED" },
+          { $set: { status: releaseStatus || "IDLE" } }
+        );
+        shouldReleaseConnector = false;
+      }
+
+      const overlapMinutes = Math.round(
+        toMinutes(
+          Math.min(new Date(overlapping.slotEnd).getTime(), slotEnd.getTime()) -
+            Math.max(
+              new Date(overlapping.slotStart).getTime(),
+              normalizedStart.getTime()
+            )
+        )
+      );
+      throw new HttpError(
+        409,
+        `Connector already reserved for the selected slot (overlap ${overlapMinutes} minutes)`
+      );
+    }
+
 
     const booking = await Booking.create({
       userId,
@@ -395,10 +473,15 @@ exports.createBooking = asyncHandler(async (req, res) => {
     });
   } catch (err) {
     // rollback trạng thái connector nếu lỗi
-    if (connectorDoc) {
-      await Connector.findByIdAndUpdate(connectorDoc._id, {
-        $set: { status: 'IDLE' },
-      });
+    // if (connectorDoc) {
+    //   await Connector.findByIdAndUpdate(connectorDoc._id, {
+    //     $set: { status: 'IDLE' },
+    //   });
+    if (shouldReleaseConnector && connectorDoc?._id) {
+      await Connector.findOneAndUpdate(
+        { _id: connectorDoc._id, status: "RESERVED" },
+        { $set: { status: releaseStatus || "IDLE" } }
+      );
     }
     throw err;
   }
@@ -512,14 +595,19 @@ exports.cancelBooking = asyncHandler(async (req, res) => {
 
 // GET /api/v1/bookings/available-slots
 exports.getAvailableSlots = asyncHandler(async (req, res) => {
-  const { stationId, date, connectorType, duration = BOOKING_SLOT_MINUTES } = req.query;
+  const {
+    stationId,
+    date,
+    connectorType,
+    duration = BOOKING_SLOT_MINUTES,
+  } = req.query;
 
-  if (!stationId) throw new HttpError(400, 'stationId is required');
+  if (!stationId) throw new HttpError(400, "stationId is required");
 
   // Parse date (default to today)
   const targetDate = date ? new Date(date) : new Date();
   if (Number.isNaN(targetDate.getTime())) {
-    throw new HttpError(400, 'Invalid date format');
+    throw new HttpError(400, "Invalid date format");
   }
 
   // Time range trong ngày
@@ -529,18 +617,21 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
   endOfDay.setHours(23, 59, 59, 999);
 
   // Lọc connector theo station + trạng thái IDLE (+ loại nếu có)
-  const connectorFilter = { stationId, status: 'IDLE' };
+  // Lọc connector theo station + trạng thái không OFFLINE (+ loại nếu có)
+  // const connectorFilter = { stationId, status: { $ne: 'OFFLINE' } };
+  // Lọc connector theo station + trạng thái không OFFLINE (+ loại nếu có)
+  const connectorFilter = { stationId, status: { $ne: "OFFLINE" } };
   if (connectorType) connectorFilter.type = connectorType;
 
   const connectors = await Connector.find(connectorFilter)
-    .populate('stationId', 'name lat lng status')
+    .populate("stationId", "name lat lng status")
     .lean();
 
   if (connectors.length === 0) {
     return res.json({
-      message: 'No available connectors found',
+      message: "No available connectors found",
       availableSlots: [],
-      date: targetDate.toISOString().split('T')[0],
+      date: targetDate.toISOString().split("T")[0],
     });
   }
 
@@ -564,7 +655,9 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
       if (slotStart < new Date()) continue;
 
       const slotEnd = new Date(slotStart);
-      slotEnd.setMinutes(slotEnd.getMinutes() + Number(duration || BOOKING_SLOT_MINUTES));
+      slotEnd.setMinutes(
+        slotEnd.getMinutes() + Number(duration || BOOKING_SLOT_MINUTES)
+      );
 
       const availableConnectors = [];
 
@@ -578,7 +671,11 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
         });
 
         if (!hasOverlap) {
-          const tariff = await Tariff.findEffectiveAt(stationId, connector.type, slotStart);
+          const tariff = await Tariff.findEffectiveAt(
+            stationId,
+            connector.type,
+            slotStart
+          );
 
           availableConnectors.push({
             connectorId: connector._id,
@@ -590,7 +687,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
                   pricePerMin: tariff.pricePerMin,
                   pricePerKwh: tariff.pricePerKwh,
                   idleFeePerMin: tariff.idleFeePerMin,
-                  currency: 'VND',
+                  currency: "VND",
                   mode: tariff.mode,
                 }
               : null,
@@ -617,8 +714,8 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
   }
 
   res.json({
-    message: 'Available slots retrieved successfully',
-    date: targetDate.toISOString().split('T')[0],
+    message: "Available slots retrieved successfully",
+    date: targetDate.toISOString().split("T")[0],
     totalSlots: slots.length,
     availableSlots: slots,
   });
