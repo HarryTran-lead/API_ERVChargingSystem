@@ -115,8 +115,10 @@ const dayKey = (d) =>
 const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 const endOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
 
-const addDays = (d, days) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + days);
-const addMonths = (d, months) => new Date(d.getFullYear(), d.getMonth() + months, 1);
+const addDays = (d, days) =>
+  new Date(d.getFullYear(), d.getMonth(), d.getDate() + days);
+const addMonths = (d, months) =>
+  new Date(d.getFullYear(), d.getMonth() + months, 1);
 
 const buildDayBuckets = (from, toExclusive) => {
   const buckets = [];
@@ -151,9 +153,42 @@ const RANGE_PRESETS = {
   '12m': { type: 'month', months: 12 },
 };
 
+const parseDateInput = (value) => {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const normalizeQueryScalar = (value) =>
+  Array.isArray(value) ? (value.length > 0 ? value[0] : null) : value;
+
 // Trả về from/to (to là exclusive), đơn vị unit ("day"|"month") & key
-function resolveWindow(rangeRaw, yearRaw, endRaw) {
+function resolveWindow(rangeRaw, yearRaw, endRaw, customFromRaw, customToRaw) {
   const now = new Date();
+  const customFrom = parseDateInput(normalizeQueryScalar(customFromRaw));
+  const customTo = parseDateInput(normalizeQueryScalar(customToRaw));
+
+  if (customFrom || customTo) {
+    if (!customFrom || !customTo) {
+      throw new HttpError(
+        400,
+        'Both from and to must be provided when filtering by date range'
+      );
+    }
+    if (customFrom > customTo) {
+      throw new HttpError(400, 'from must be earlier than to');
+    }
+
+    const from = startOfDay(customFrom);
+    const to = endOfDay(customTo);
+
+    const diffTime = to.getTime() - from.getTime();
+    const diffDays = diffTime / (1000 * 60 * 60 * 24);
+    const unit = diffDays > 31 ? 'month' : 'day';
+
+    return { from, to, unit, rangeKey: 'custom' };
+  }
+
   const rangeKey = (rangeRaw || '6m').toLowerCase();
   const preset = RANGE_PRESETS[rangeKey] || RANGE_PRESETS['6m'];
 
@@ -173,7 +208,8 @@ function resolveWindow(rangeRaw, yearRaw, endRaw) {
     to = new Date(y + 1, 0, 1); // exclusive
   }
 
-  let from, unit;
+  let from;
+  let unit;
   if (preset.type === 'day') {
     unit = 'day';
     if (preset.days === 1) {
@@ -193,8 +229,16 @@ function resolveWindow(rangeRaw, yearRaw, endRaw) {
   } else {
     unit = 'month';
     const lastMonthStart = new Date(to.getFullYear(), to.getMonth(), 1);
-    from = new Date(lastMonthStart.getFullYear(), lastMonthStart.getMonth() - (preset.months - 1), 1);
-    to = new Date(lastMonthStart.getFullYear(), lastMonthStart.getMonth() + 1, 1);
+    from = new Date(
+      lastMonthStart.getFullYear(),
+      lastMonthStart.getMonth() - (preset.months - 1),
+      1
+    );
+    to = new Date(
+      lastMonthStart.getFullYear(),
+      lastMonthStart.getMonth() + 1,
+      1
+    );
   }
 
   return { from, to, unit, rangeKey };
@@ -300,7 +344,9 @@ exports.getMyChargingHabits = asyncHandler(async (req, res) => {
   ]);
 
   const stationIds = [...new Set(sessions.map((s) => s.stationId).filter(Boolean))];
-  const connectorIds = [...new Set(sessions.map((s) => s.connectorId).filter(Boolean))];
+  const connectorIds = [
+    ...new Set(sessions.map((s) => s.connectorId).filter(Boolean)),
+  ];
 
   const [stations, connectors] = await Promise.all([
     stationIds.length
@@ -316,7 +362,9 @@ exports.getMyChargingHabits = asyncHandler(async (req, res) => {
   ]);
 
   const stationMap = Object.fromEntries(stations.map((s) => [String(s._id), s]));
-  const connectorMap = Object.fromEntries(connectors.map((c) => [String(c._id), c]));
+  const connectorMap = Object.fromEntries(
+    connectors.map((c) => [String(c._id), c])
+  );
 
   const byStation = {};
   const byHour = new Array(24).fill(0);
@@ -378,11 +426,25 @@ exports.getMyChargingHabits = asyncHandler(async (req, res) => {
 });
 
 /* ========== GET /api/v1/analytics/admin/overview
-      ?range=1d|7d|1m|3m|6m|12m&year=YYYY&end=ISO&stationId=ID ========== */
+      ?range=1d|7d|1m|3m|6m|12m&year=YYYY&end=ISO&stationId=ID
+      hoặc dùng from=ISO&to=ISO (custom range) ========== */
 exports.getAdminOverview = asyncHandler(async (req, res) => {
   // --- đọc tham số ---
-  const { range, year, end, stationId } = req.query;
-  const { from, to, unit, rangeKey } = resolveWindow(range, year, end);
+  const {
+    range,
+    year,
+    end,
+    stationId,
+    from: fromQuery,
+    to: toQuery,
+  } = req.query;
+  const { from, to, unit, rangeKey } = resolveWindow(
+    range,
+    year,
+    end,
+    fromQuery,
+    toQuery
+  );
 
   // Chuẩn hóa & validate stationId: 'all' => bỏ lọc; còn lại phải là ObjectId hợp lệ
   const rawStationId = Array.isArray(stationId) ? stationId[0] : stationId;
@@ -392,7 +454,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
   let stationObjectId = null;
   if (trimmedStationId) {
     const stationIdLower =
-      typeof trimmedStationId === 'string' ? trimmedStationId.toLowerCase() : trimmedStationId;
+      typeof trimmedStationId === 'string'
+        ? trimmedStationId.toLowerCase()
+        : trimmedStationId;
     if (stationIdLower !== 'all') {
       if (!mongoose.Types.ObjectId.isValid(trimmedStationId)) {
         throw new HttpError(400, 'Invalid stationId');
@@ -402,8 +466,16 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
   }
 
   const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const startOfToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate()
+  );
+  const endOfToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() + 1
+  );
 
   // --- facets người dùng / trạm / connector / booking ---
   const userStatsPromise = User.aggregate([
@@ -430,7 +502,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
   if (stationObjectId) {
     stationStatusPipeline.push({ $match: { _id: stationObjectId } });
   }
-  stationStatusPipeline.push({ $group: { _id: '$status', count: { $sum: 1 } } });
+  stationStatusPipeline.push({
+    $group: { _id: '$status', count: { $sum: 1 } },
+  });
   const stationStatusPromise = Station.aggregate(stationStatusPipeline);
 
   const connectorStatsPipeline = [];
@@ -472,7 +546,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
         {
           $match: {
             slotStart: { $gte: now },
-            status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
+            status: {
+              $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN],
+            },
           },
         },
         { $count: 'count' },
@@ -503,7 +579,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
             d: { $dayOfMonth: '$createdAt' },
           },
           revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
-          energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+          energyKwh: {
+            $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] },
+          },
           sessions: { $sum: 1 },
         }
       : {
@@ -512,7 +590,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
             m: { $month: '$createdAt' },
           },
           revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
-          energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+          energyKwh: {
+            $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] },
+          },
           sessions: { $sum: 1 },
         };
 
@@ -526,7 +606,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
       active: [
         {
           $match: {
-            status: { $in: [SESSION_STATUS.PENDING, SESSION_STATUS.CHARGING] },
+            status: {
+              $in: [SESSION_STATUS.PENDING, SESSION_STATUS.CHARGING],
+            },
           },
         },
         { $count: 'count' },
@@ -537,7 +619,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
           $group: {
             _id: null,
             revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
-            energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+            energyKwh: {
+              $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] },
+            },
             sessions: { $sum: 1 },
           },
         },
@@ -553,7 +637,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
           $group: {
             _id: null,
             revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
-            energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+            energyKwh: {
+              $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] },
+            },
             sessions: { $sum: 1 },
           },
         },
@@ -566,7 +652,13 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
           },
         },
         { $group: sessionSeriesGroup },
-        { $sort: { '_id.y': 1, '_id.m': 1, ...(unit === 'day' ? { '_id.d': 1 } : {}) } },
+        {
+          $sort: {
+            '_id.y': 1,
+            '_id.m': 1,
+            ...(unit === 'day' ? { '_id.d': 1 } : {}),
+          },
+        },
       ],
       topStations: [
         {
@@ -579,7 +671,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
           $group: {
             _id: '$stationId',
             revenue: { $sum: { $ifNull: ['$billing.totalAmount', 0] } },
-            energyKwh: { $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] } },
+            energyKwh: {
+              $sum: { $ifNull: ['$billing.breakdown.energyKwh', 0] },
+            },
             sessions: { $sum: 1 },
           },
         },
@@ -594,7 +688,11 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
   const invoiceSeriesGroup =
     unit === 'day'
       ? {
-          _id: { y: { $year: '$createdAt' }, m: { $month: '$createdAt' }, d: { $dayOfMonth: '$createdAt' } },
+          _id: {
+            y: { $year: '$createdAt' },
+            m: { $month: '$createdAt' },
+            d: { $dayOfMonth: '$createdAt' },
+          },
           total: { $sum: { $ifNull: ['$total', 0] } },
           currency: { $first: { $ifNull: ['$currency', 'VND'] } },
         }
@@ -611,12 +709,14 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
       $lookup: {
         from: 'sessions',
         localField: 'session_id', // lưu ý: trường liên kết
-        foreignField: 'id',       // session "id" (không phải _id) trong hệ thống
+        foreignField: 'id', // session "id" (không phải _id) trong hệ thống
         as: 'sessionDoc',
       },
     });
     invoiceStatsPipeline.push({ $unwind: '$sessionDoc' });
-    invoiceStatsPipeline.push({ $match: { 'sessionDoc.stationId': stationObjectId } });
+    invoiceStatsPipeline.push({
+      $match: { 'sessionDoc.stationId': stationObjectId },
+    });
     invoiceStatsPipeline.push({ $project: { sessionDoc: 0 } });
   }
   invoiceStatsPipeline.push({
@@ -645,7 +745,13 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
       series: [
         { $match: { createdAt: { $gte: from, $lt: to } } },
         { $group: invoiceSeriesGroup },
-        { $sort: { '_id.y': 1, '_id.m': 1, ...(unit === 'day' ? { '_id.d': 1 } : {}) } },
+        {
+          $sort: {
+            '_id.y': 1,
+            '_id.m': 1,
+            ...(unit === 'day' ? { '_id.d': 1 } : {}),
+          },
+        },
       ],
     },
   });
@@ -716,23 +822,53 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
 
   const userByRole = buildCountMap(userStats.byRole, toArray(ROLES));
   const userByStatus = buildCountMap(userStats.byStatus, ['ACTIVE', 'SUSPENDED']);
-  const totalUsers = Object.values(userByRole).reduce((sum, c) => sum + c, 0);
+  const totalUsers = Object.values(userByRole).reduce(
+    (sum, c) => sum + c,
+    0
+  );
 
-  const stationByStatus = buildCountMap(stationStatusRows, toArray(STATION_STATUS));
-  const totalStations = Object.values(stationByStatus).reduce((s, c) => s + c, 0);
+  const stationByStatus = buildCountMap(
+    stationStatusRows,
+    toArray(STATION_STATUS)
+  );
+  const totalStations = Object.values(stationByStatus).reduce(
+    (s, c) => s + c,
+    0
+  );
 
-  const connectorsByStatus = buildConnectorMap(connectorStats.byStatus, toArray(CONNECTOR_STATUS));
+  const connectorsByStatus = buildConnectorMap(
+    connectorStats.byStatus,
+    toArray(CONNECTOR_STATUS)
+  );
   const connectorsByType = buildConnectorMap(connectorStats.byType);
-  const totalConnectors = Object.values(connectorsByStatus).reduce((s, it) => s + it.count, 0);
-  const totalConnectorPowerKw = Object.values(connectorsByStatus).reduce((s, it) => s + it.totalPowerKw, 0);
+  const totalConnectors = Object.values(connectorsByStatus).reduce(
+    (s, it) => s + it.count,
+    0
+  );
+  const totalConnectorPowerKw = Object.values(connectorsByStatus).reduce(
+    (s, it) => s + it.totalPowerKw,
+    0
+  );
 
-  const bookingsByStatus = buildCountMap(bookingStats.byStatus, BOOKING_STATUS_VALUES);
-  const totalBookings = Object.values(bookingsByStatus).reduce((s, c) => s + c, 0);
+  const bookingsByStatus = buildCountMap(
+    bookingStats.byStatus,
+    BOOKING_STATUS_VALUES
+  );
+  const totalBookings = Object.values(bookingsByStatus).reduce(
+    (s, c) => s + c,
+    0
+  );
   const upcomingBookings = getFacetCount(bookingStats.upcoming);
   const todayBookings = getFacetCount(bookingStats.today);
 
-  const sessionsByStatus = buildCountMap(sessionStats.byStatus, SESSION_STATUS_VALUES);
-  const totalSessions = Object.values(sessionsByStatus).reduce((s, c) => s + c, 0);
+  const sessionsByStatus = buildCountMap(
+    sessionStats.byStatus,
+    SESSION_STATUS_VALUES
+  );
+  const totalSessions = Object.values(sessionsByStatus).reduce(
+    (s, c) => s + c,
+    0
+  );
   const activeSessions = getFacetCount(sessionStats.active);
 
   const lifetimeCharging = getFacetMetrics(sessionStats.lifetime);
@@ -742,16 +878,16 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
   const revenueSelected = getFacetRevenue(invoiceStats.selectedRange);
 
   // --- series buckets & map ---
-  const seriesBuckets = unit === 'day'
-    ? buildDayBuckets(from, to)
-    : buildMonthBucketsRange(from, to);
+  const seriesBuckets =
+    unit === 'day' ? buildDayBuckets(from, to) : buildMonthBucketsRange(from, to);
 
   const chargingSeriesMap = new Map();
   for (const row of sessionStats.series || []) {
     const y = row?._id?.y;
     const m = row?._id?.m;
     const d = unit === 'day' ? row?._id?.d : null;
-    const label = unit === 'day' ? `${y}-${pad2(m)}-${pad2(d)}` : `${y}-${pad2(m)}`;
+    const label =
+      unit === 'day' ? `${y}-${pad2(m)}-${pad2(d)}` : `${y}-${pad2(m)}`;
     chargingSeriesMap.set(label, {
       revenue: row?.revenue || 0,
       energyKwh: row?.energyKwh || 0,
@@ -760,11 +896,12 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
   }
 
   const revenueSeriesMap = new Map();
-  for (const row of (invoiceStats.series || [])) {
+  for (const row of invoiceStats.series || []) {
     const y = row?._id?.y;
     const m = row?._id?.m;
     const d = unit === 'day' ? row?._id?.d : null;
-    const label = unit === 'day' ? `${y}-${pad2(m)}-${pad2(d)}` : `${y}-${pad2(m)}`;
+    const label =
+      unit === 'day' ? `${y}-${pad2(m)}-${pad2(d)}` : `${y}-${pad2(m)}`;
     revenueSeriesMap.set(label, row?.total || 0);
   }
 
@@ -774,7 +911,12 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
   }));
 
   const chargingSeries = seriesBuckets.map(({ label }) => {
-    const v = chargingSeriesMap.get(label) || { revenue: 0, energyKwh: 0, sessions: 0 };
+    const v =
+      chargingSeriesMap.get(label) || {
+        revenue: 0,
+        energyKwh: 0,
+        sessions: 0,
+      };
     return { bucket: label, ...v };
   });
 
@@ -787,7 +929,9 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
           .select('_id name lat lng status')
           .lean()
       : [];
-  const stationMeta = new Map(stationDocs.map((doc) => [String(doc._id), doc]));
+  const stationMeta = new Map(
+    stationDocs.map((doc) => [String(doc._id), doc])
+  );
   const topStations = topStationsRaw.map((row) => {
     const id = row?._id ? String(row._id) : null;
     const meta = id ? stationMeta.get(id) : null;
@@ -805,7 +949,10 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
 
   const overallFeedback = feedbackStats.overall?.[0] || null;
   const inRangeFeedback = feedbackStats.selectedRange?.[0] || null;
-  const feedbackDistribution = buildCountMap(feedbackStats.distribution || [], [1, 2, 3, 4, 5]);
+  const feedbackDistribution = buildCountMap(
+    feedbackStats.distribution || [],
+    [1, 2, 3, 4, 5]
+  );
 
   const roundRating = (value) =>
     typeof value === 'number' ? Math.round(value * 100) / 100 : null;
@@ -814,10 +961,10 @@ exports.getAdminOverview = asyncHandler(async (req, res) => {
   return res.json({
     generatedAt: now.toISOString(),
     range: {
-      key: rangeKey,         // "1d" | "7d" | "1m" | "3m" | "6m" | "12m"
-      unit,                  // "day" | "month"
-      from,                  // inclusive
-      to,                    // exclusive
+      key: rangeKey, // "1d" | "7d" | "1m" | "3m" | "6m" | "12m" | "custom"
+      unit, // "day" | "month"
+      from, // inclusive
+      to, // exclusive
       year: Number.isFinite(Number(year)) ? Number(year) : null,
     },
     totals: {
