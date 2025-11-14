@@ -20,6 +20,11 @@ router.get(
   protect([ROLES.ADMIN, ROLES.STAFF, ROLES.DRIVER]),
   C.listCompatibleStationsForVehicle
 );
+router.get(
+  "/available-by-time",
+  protect([ROLES.ADMIN, ROLES.STAFF, ROLES.DRIVER]),
+  C.listAvailableStationsByTime
+);
 
 router.get(
   "/:id",

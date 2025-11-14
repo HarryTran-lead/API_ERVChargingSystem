@@ -3,6 +3,8 @@ const Station = require("../models/Station");
 const asyncHandler = require("../utils/asyncHandler");
 const { HttpError } = require("../utils/errors");
 const Charger = require("../models/Charger");
+const Booking = require("../models/Booking");
+const Tariff = require("../models/Tariff");
 const Connector = require("../models/Connector");
 const Vehicle = require("../models/Vehicle");
 const { ensureRequestUserId } = require("../utils/requestUser");
@@ -13,6 +15,8 @@ const {
 const {
   getConnectorTypesForVehiclePlug,
 } = require("../utils/connectorCompatibility");
+const { BOOKING_STATUS } = require("../constants/enums");
+const { BOOKING_SLOT_MINUTES } = require("../constants/business");
 const mongoose = require("mongoose");
 
 const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
@@ -476,6 +480,217 @@ exports.listCompatibleStationsForVehicle = asyncHandler(async (req, res) => {
   });
 
   sendResponse(stationsPayload);
+});
+
+/* ============================================================================
+ * List stations that have available connectors for a given time window
+ * ==========================================================================*/
+exports.listAvailableStationsByTime = asyncHandler(async (req, res) => {
+  const {
+    startTime,
+    durationMinutes = BOOKING_SLOT_MINUTES,
+    connectorType,
+    stationId,
+    stationStatus,
+  } = req.query;
+
+  if (!startTime) {
+    throw new HttpError(400, "startTime is required");
+  }
+
+  const slotStart = new Date(startTime);
+  if (Number.isNaN(slotStart.getTime())) {
+    throw new HttpError(400, "Invalid startTime format");
+  }
+
+  const duration = Number(durationMinutes);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new HttpError(400, "durationMinutes must be a positive number");
+  }
+
+  const slotEnd = new Date(slotStart.getTime() + duration * 60000);
+
+  const { stationObjectId } = resolveStaffStationScope(req);
+
+  const connectorFilter = { status: { $ne: "OFFLINE" } };
+  if (stationObjectId) {
+    connectorFilter.stationId = stationObjectId;
+  } else if (stationId) {
+    connectorFilter.stationId = stationId;
+  }
+  if (connectorType) connectorFilter.type = connectorType;
+
+  const connectors = await Connector.find(connectorFilter)
+    .select("_id stationId chargerId type powerKw code status")
+    .lean();
+
+  if (connectors.length === 0) {
+    return res.json({
+      slot: {
+        start: slotStart.toISOString(),
+        end: slotEnd.toISOString(),
+        durationMinutes: duration,
+      },
+      stations: [],
+    });
+  }
+
+  const connectorIds = connectors.map((conn) => conn._id);
+
+  const overlappingBookings = await Booking.find({
+    connectorId: { $in: connectorIds },
+    status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
+    slotStart: { $lt: slotEnd },
+    slotEnd: { $gt: slotStart },
+  })
+    .select("connectorId")
+    .lean();
+
+  const busyConnectorIds = new Set(
+    overlappingBookings
+      .map((bk) => bk.connectorId?.toString())
+      .filter(Boolean)
+  );
+
+  const availableConnectors = connectors.filter(
+    (conn) => conn.stationId && !busyConnectorIds.has(conn._id.toString())
+  );
+
+  if (availableConnectors.length === 0) {
+    return res.json({
+      slot: {
+        start: slotStart.toISOString(),
+        end: slotEnd.toISOString(),
+        durationMinutes: duration,
+      },
+      stations: [],
+    });
+  }
+
+  const uniqueStationIds = [
+    ...new Set(
+      availableConnectors
+        .map((conn) => conn.stationId?.toString())
+        .filter(Boolean)
+    ),
+  ];
+
+  const stationObjectIds = uniqueStationIds
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  if (stationObjectIds.length === 0) {
+    return res.json({
+      slot: {
+        start: slotStart.toISOString(),
+        end: slotEnd.toISOString(),
+        durationMinutes: duration,
+      },
+      stations: [],
+    });
+  }
+
+  const stationFilter = { _id: { $in: stationObjectIds } };
+  if (stationObjectId) {
+    stationFilter._id = stationObjectId;
+  }
+  if (stationStatus) stationFilter.status = stationStatus;
+
+  const stations = await Station.find(stationFilter)
+    .select("_id name lat lng status")
+    .lean();
+
+  if (stations.length === 0) {
+    return res.json({
+      slot: {
+        start: slotStart.toISOString(),
+        end: slotEnd.toISOString(),
+        durationMinutes: duration,
+      },
+      stations: [],
+    });
+  }
+
+  const allowedStationIds = new Set(stations.map((st) => st._id.toString()));
+
+  const connectorsByStation = new Map();
+  availableConnectors.forEach((conn) => {
+    const stationIdStr = conn.stationId.toString();
+    if (!allowedStationIds.has(stationIdStr)) return;
+    if (!connectorsByStation.has(stationIdStr)) {
+      connectorsByStation.set(stationIdStr, []);
+    }
+    connectorsByStation.get(stationIdStr).push(conn);
+  });
+
+  const tariffCache = new Map();
+  const tariffLookups = [];
+
+  connectorsByStation.forEach((connectorList, stationIdStr) => {
+    connectorList.forEach((conn) => {
+      const key = `${stationIdStr}_${conn.type}`;
+      if (tariffCache.has(key)) return;
+      tariffCache.set(key, null);
+      tariffLookups.push({ key, stationId: conn.stationId, connectorType: conn.type });
+    });
+  });
+
+  await Promise.all(
+    tariffLookups.map(async ({ key, stationId: stId, connectorType }) => {
+      const tariff = await Tariff.findEffectiveAt(stId, connectorType, slotStart);
+      tariffCache.set(key, tariff || null);
+    })
+  );
+
+  const stationMap = new Map(stations.map((st) => [st._id.toString(), st]));
+
+  const stationsPayload = [];
+
+  connectorsByStation.forEach((connectorList, stationIdStr) => {
+    const station = stationMap.get(stationIdStr);
+    if (!station) return;
+
+    const connectorsPayload = connectorList.map((conn) => {
+      const key = `${stationIdStr}_${conn.type}`;
+      const tariff = tariffCache.get(key);
+      const pricing = tariff
+        ? {
+            pricePerMin: tariff.pricePerMin,
+            pricePerKwh: tariff.pricePerKwh,
+            idleFeePerMin: tariff.idleFeePerMin,
+            currency: "VND",
+            mode: tariff.mode,
+          }
+        : null;
+
+      return {
+        id: conn._id,
+        code: conn.code,
+        type: conn.type,
+        powerKw: conn.powerKw,
+        pricing,
+      };
+    });
+
+    stationsPayload.push({
+      id: station._id,
+      name: station.name,
+      lat: station.lat,
+      lng: station.lng,
+      status: station.status,
+      availableConnectorCount: connectorsPayload.length,
+      availableConnectors: connectorsPayload,
+    });
+  });
+
+  res.json({
+    slot: {
+      start: slotStart.toISOString(),
+      end: slotEnd.toISOString(),
+      durationMinutes: duration,
+    },
+    stations: stationsPayload,
+  });
 });
 
 /* ============================================================================
