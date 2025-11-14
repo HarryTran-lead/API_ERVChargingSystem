@@ -26,7 +26,13 @@ function toSignString(obj) {
 }
 
 /** Cộng ví idempotent */
-async function creditWalletIdempotent({ user_id, amount, idempotency_key, method = 'payos', meta = {} }) {
+async function creditWalletIdempotent({
+  user_id,
+  amount,
+  idempotency_key,
+  method = 'payos',
+  meta = {},
+}) {
   const session = await Wallet.startSession();
   let balance = 0;
   try {
@@ -34,15 +40,36 @@ async function creditWalletIdempotent({ user_id, amount, idempotency_key, method
       const w = await Wallet.findOne({ user_id }).session(session);
       if (!w) throw new Error('Wallet not found');
 
-      const existed = await WalletTx.findOne({ user_id, idempotency_key }).session(session);
-      if (existed && existed.status === 'SUCCEEDED') { balance = w.balance; return; }
+      const existed = await WalletTx.findOne({
+        user_id,
+        idempotency_key,
+      }).session(session);
 
-      const [tx] = await WalletTx.create([{
-        wallet_id: w.id, user_id, type: 'TOPUP', amount, method, idempotency_key, status: 'PENDING', meta
-      }], { session });
+      if (existed && existed.status === 'SUCCEEDED') {
+        balance = w.balance;
+        return;
+      }
+
+      const [tx] = await WalletTx.create(
+        [
+          {
+            wallet_id: w.id,
+            user_id,
+            type: 'TOPUP',
+            amount,
+            method,
+            idempotency_key,
+            status: 'PENDING',
+            meta,
+          },
+        ],
+        { session }
+      );
 
       const updated = await Wallet.findOneAndUpdate(
-        { user_id }, { $inc: { balance: amount } }, { new: true, session }
+        { user_id },
+        { $inc: { balance: amount } },
+        { new: true, session }
       );
       balance = updated.balance;
 
@@ -52,7 +79,9 @@ async function creditWalletIdempotent({ user_id, amount, idempotency_key, method
         { session }
       );
     });
-  } finally { session.endSession(); }
+  } finally {
+    session.endSession();
+  }
   return { balance };
 }
 
@@ -62,17 +91,20 @@ async function creditWalletIdempotent({ user_id, amount, idempotency_key, method
 async function initiateTopUpPayOS(req, res) {
   try {
     const {
-      PAYOS_CLIENT_ID, PAYOS_API_KEY, PAYOS_CHECKSUM_KEY,
-      PAYOS_RETURN_URL, PAYOS_CANCEL_URL
+      PAYOS_CLIENT_ID,
+      PAYOS_API_KEY,
+      PAYOS_CHECKSUM_KEY,
+      PAYOS_RETURN_URL,
+      PAYOS_CANCEL_URL,
     } = process.env;
 
     // Kiểm tra ENV (tránh gửi thiếu thông tin)
     const missing = [];
-    if (!PAYOS_CLIENT_ID)    missing.push('PAYOS_CLIENT_ID');
-    if (!PAYOS_API_KEY)      missing.push('PAYOS_API_KEY');
+    if (!PAYOS_CLIENT_ID) missing.push('PAYOS_CLIENT_ID');
+    if (!PAYOS_API_KEY) missing.push('PAYOS_API_KEY');
     if (!PAYOS_CHECKSUM_KEY) missing.push('PAYOS_CHECKSUM_KEY');
-    if (!PAYOS_RETURN_URL)   missing.push('PAYOS_RETURN_URL');
-    if (!PAYOS_CANCEL_URL)   missing.push('PAYOS_CANCEL_URL');
+    if (!PAYOS_RETURN_URL) missing.push('PAYOS_RETURN_URL');
+    if (!PAYOS_CANCEL_URL) missing.push('PAYOS_CANCEL_URL');
     if (missing.length) return res.status(400).json({ msg: 'Thiếu ENV PayOS', missing });
 
     // Input
@@ -86,11 +118,11 @@ async function initiateTopUpPayOS(req, res) {
 
     // LƯU Ý: 2 URL này phải nằm trong whitelist trên Dashboard PayOS (đúng scheme/host/port)
     const payload = {
-      orderCode,            // number
-      amount,               // number
+      orderCode, // number
+      amount, // number
       description: 'Topup', // string
       returnUrl: PAYOS_RETURN_URL,
-      cancelUrl: PAYOS_CANCEL_URL
+      cancelUrl: PAYOS_CANCEL_URL,
     };
 
     // Ký HMAC SHA256 trên chuỗi key=val&... (đã sort) — signature đặt TRONG BODY
@@ -104,8 +136,11 @@ async function initiateTopUpPayOS(req, res) {
 
     console.log('[PayOS/init] signString =', signString);
     console.log('[PayOS/init] signature  =', signature);
-    console.log('[PayOS/init] headers idLen=%d keyLen=%d',
-      (PAYOS_CLIENT_ID || '').trim().length, (PAYOS_API_KEY || '').trim().length);
+    console.log(
+      '[PayOS/init] headers idLen=%d keyLen=%d',
+      (PAYOS_CLIENT_ID || '').trim().length,
+      (PAYOS_API_KEY || '').trim().length
+    );
 
     // Gọi API (signature trong body; header chỉ cần client-id và api-key)
     const { data } = await axios.post(
@@ -114,9 +149,9 @@ async function initiateTopUpPayOS(req, res) {
       {
         headers: {
           'x-client-id': (PAYOS_CLIENT_ID || '').trim(),
-          'x-api-key'  : (PAYOS_API_KEY  || '').trim(),
-          'content-type': 'application/json'
-        }
+          'x-api-key': (PAYOS_API_KEY || '').trim(),
+          'content-type': 'application/json',
+        },
       }
     );
 
@@ -130,7 +165,7 @@ async function initiateTopUpPayOS(req, res) {
       provider_order_id: String(orderCode),
       amount,
       method: 'payos',
-      status: 'PENDING'
+      status: 'PENDING',
     });
 
     const checkoutUrl = data?.data?.checkoutUrl || data?.checkoutUrl;
@@ -148,26 +183,38 @@ async function payosWebhook(req, res) {
   try {
     // Phải có middleware raw trước route này:
     // app.use('/api/v1/payments/payos/webhook', express.raw({ type: 'application/json' }));
-    const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (req.body || '');
-    const sigHeader = String(req.headers['x-payos-signature'] || req.headers['x-signature'] || '');
-    const expected  = crypto.createHmac('sha256', (process.env.PAYOS_CHECKSUM_KEY || '').trim())
-                            .update(rawBody).digest('hex');
+    const rawBody = Buffer.isBuffer(req.body)
+      ? req.body.toString('utf8')
+      : req.body || '';
+    const sigHeader = String(
+      req.headers['x-payos-signature'] || req.headers['x-signature'] || ''
+    );
+    const expected = crypto
+      .createHmac('sha256', (process.env.PAYOS_CHECKSUM_KEY || '').trim())
+      .update(rawBody)
+      .digest('hex');
 
     if (sigHeader !== expected) return res.status(400).send('INVALID');
 
     const body = JSON.parse(rawBody);
     if (String(body.code) === '00' && body?.data?.status === 'PAID') {
       const orderCode = String(body.data.orderCode);
-      const ps = await PaymentSession.findOne({ provider: 'payos', provider_order_id: orderCode });
+      const ps = await PaymentSession.findOne({
+        provider: 'payos',
+        provider_order_id: orderCode,
+      });
       if (ps) {
         await creditWalletIdempotent({
           user_id: ps.user_id,
-          amount : ps.amount,  // tin vào số đã lưu khi initiate
+          amount: ps.amount, // tin vào số đã lưu khi initiate
           idempotency_key: `payos:${orderCode}`,
-          method : 'payos',
-          meta   : body.data
+          method: 'payos',
+          meta: body.data,
         });
-        await PaymentSession.updateOne({ _id: ps._id }, { $set: { status: 'SUCCEEDED' } });
+        await PaymentSession.updateOne(
+          { _id: ps._id },
+          { $set: { status: 'SUCCEEDED' } }
+        );
       }
     }
     return res.status(200).send('OK');
@@ -176,15 +223,27 @@ async function payosWebhook(req, res) {
     return res.status(200).send('OK'); // PayOS chỉ cần 200 để ngừng retry
   }
 }
-// Fallback: cộng ví ở return nếu webhook chưa kịp đến
-exports.payosReturn = async (req, res) => {
+
+/* =========================
+ * PayOS — RETURN (fallback cộng ví nếu webhook chưa kịp)
+ * ========================= */
+async function payosReturn(req, res) {
   try {
     const { orderCode } = req.query;
     const oc = String(orderCode || '');
 
     // 1) Tìm PaymentSession
-    const ps = await PaymentSession.findOne({ provider: 'payos', provider_order_id: oc });
-    if (!ps) return res.json({ ok: false, reason: 'PaymentSession not found', query: req.query });
+    const ps = await PaymentSession.findOne({
+      provider: 'payos',
+      provider_order_id: oc,
+    });
+    if (!ps) {
+      return res.json({
+        ok: false,
+        reason: 'PaymentSession not found',
+        query: req.query,
+      });
+    }
 
     // 2) Nếu chưa SUCCEEDED, hỏi PayOS để xác thực
     if (ps.status !== 'SUCCEEDED') {
@@ -192,8 +251,8 @@ exports.payosReturn = async (req, res) => {
       const { data } = await axios.get(`${BASE}/payment-requests/${oc}`, {
         headers: {
           'x-client-id': (process.env.PAYOS_CLIENT_ID || '').trim(),
-          'x-api-key'  : (process.env.PAYOS_API_KEY  || '').trim(),
-        }
+          'x-api-key': (process.env.PAYOS_API_KEY || '').trim(),
+        },
       });
 
       const status = data?.data?.status;
@@ -201,30 +260,49 @@ exports.payosReturn = async (req, res) => {
         // 3) Cộng ví idempotent
         const r = await creditWalletIdempotent({
           user_id: ps.user_id,
-          amount : ps.amount,
+          amount: ps.amount,
           idempotency_key: `payos:${oc}`,
-          method : 'payos',
-          meta   : { source: 'return_fallback' }
+          method: 'payos',
+          meta: { source: 'return_fallback' },
         });
-        await PaymentSession.updateOne({ _id: ps._id }, { $set: { status: 'SUCCEEDED' } });
 
-        return res.json({ ok: true, credited: true, balance: r.balance, query: req.query });
+        await PaymentSession.updateOne(
+          { _id: ps._id },
+          { $set: { status: 'SUCCEEDED' } }
+        );
+
+        return res.json({
+          ok: true,
+          credited: true,
+          balance: r.balance,
+          query: req.query,
+        });
       }
     }
 
     // Đã cộng trước đó (do webhook) hoặc chưa PAID
-    return res.json({ ok: true, credited: ps.status === 'SUCCEEDED', query: req.query });
+    return res.json({
+      ok: true,
+      credited: ps.status === 'SUCCEEDED',
+      query: req.query,
+    });
   } catch (e) {
     console.error('[payosReturn] error:', e.response?.data || e.message);
-    return res.status(500).json({ ok: false, msg: e.message, query: req.query });
+    return res.status(500).json({
+      ok: false,
+      msg: e.message,
+      query: req.query,
+    });
   }
-};
+}
 
 /* =========================
- * Return/Cancel (optional)
+ * PayOS — CANCEL
  * ========================= */
-async function payosReturn(req, res) { res.json({ provider: 'payos', query: req.query }); }
-async function payosCancel(req, res) { res.json({ provider: 'payos', query: req.query }); }
+async function payosCancel(req, res) {
+  // chỗ này chủ yếu để FE biết user đã cancel, không cộng ví
+  return res.json({ provider: 'payos', query: req.query });
+}
 
 module.exports = {
   initiateTopUpPayOS,
