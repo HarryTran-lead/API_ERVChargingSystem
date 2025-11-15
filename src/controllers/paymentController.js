@@ -245,6 +245,9 @@ async function payosReturn(req, res) {
       });
     }
 
+    const successUrl = (process.env.FRONTEND_TOPUP_SUCCESS_URL || 'http://localhost:5173/topup/success').trim();
+    const cancelUrl = (process.env.FRONTEND_TOPUP_CANCEL_URL || 'http://localhost:5173/topup/cancel').trim();
+
     // 2) Nếu chưa SUCCEEDED, hỏi PayOS để xác thực
     if (ps.status !== 'SUCCEEDED') {
       const BASE = 'https://api-merchant.payos.vn/v2';
@@ -271,21 +274,24 @@ async function payosReturn(req, res) {
           { $set: { status: 'SUCCEEDED' } }
         );
 
-        return res.json({
-          ok: true,
-          credited: true,
-          balance: r.balance,
-          query: req.query,
+        const params = new URLSearchParams({
+          credited: 'true',
+          orderCode: oc,
+          balance: String(r.balance ?? ''),
         });
+        return res.redirect(`${successUrl}?${params.toString()}`);
       }
     }
 
     // Đã cộng trước đó (do webhook) hoặc chưa PAID
-    return res.json({
-      ok: true,
-      credited: ps.status === 'SUCCEEDED',
-      query: req.query,
-    });
+    if (ps.status === 'SUCCEEDED') {
+      const params = new URLSearchParams({ credited: 'true', orderCode: oc });
+      return res.redirect(`${successUrl}?${params.toString()}`);
+    }
+
+    // Not PAID yet -> redirect to cancel/fallback page
+    const params = new URLSearchParams({ credited: 'false', orderCode: oc });
+    return res.redirect(`${cancelUrl}?${params.toString()}`);
   } catch (e) {
     console.error('[payosReturn] error:', e.response?.data || e.message);
     return res.status(500).json({
@@ -301,7 +307,9 @@ async function payosReturn(req, res) {
  * ========================= */
 async function payosCancel(req, res) {
   // chỗ này chủ yếu để FE biết user đã cancel, không cộng ví
-  return res.json({ provider: 'payos', query: req.query });
+  const cancelUrl = (process.env.FRONTEND_TOPUP_CANCEL_URL || 'http://localhost:5173/topup/cancel').trim();
+  const params = new URLSearchParams({ cancelled: 'true', orderCode: String(req.query.orderCode || '' ) });
+  return res.redirect(`${cancelUrl}?${params.toString()}`);
 }
 
 module.exports = {
