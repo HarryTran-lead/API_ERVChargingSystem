@@ -51,6 +51,9 @@ app.use('/api/v1/feedbacks', require('./routes/v1/feedbackRoutes'));
 app.use('/api/v1/analytics', require('./routes/v1/analytics'));
 app.use('/api/v1/notifications', require('./routes/v1/notificationRoutes'));
 
+// Profile endpoints for current authenticated user
+app.use('/api/v1/profile', require('./routes/v1/profileRoutes'));
+
 app.use('/api/v1/memberships', require('./routes/v1/memberships'));
 app.use('/api/v1/admin/membership-plans', require('./routes/v1/adminMembershipPlans'));
 
