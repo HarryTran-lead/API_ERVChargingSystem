@@ -237,27 +237,33 @@ const populateBookingDetails = async (booking) => {
 exports.createBooking = asyncHandler(async (req, res) => {
   const { connectorId, slotStart, vehicleId } = req.body;
   if (!connectorId || !slotStart) {
-    throw new HttpError(400, 'connectorId and slotStart are required');
+    throw new HttpError(400, "connectorId and slotStart are required");
   }
 
   // Không cho client tự đính kèm snapshot xe — server sẽ tự lấy từ xe mặc định
   if (req.body.vehicle) {
-    throw new HttpError(400, 'Do not send vehicle details; the server uses your default vehicle.');
+    throw new HttpError(
+      400,
+      "Do not send vehicle details; the server uses your default vehicle."
+    );
   }
 
   const userId = ensureRequestUserId(req);
 
   const start = new Date(slotStart);
   if (Number.isNaN(start.getTime())) {
-    throw new HttpError(400, 'Invalid slotStart value');
+    throw new HttpError(400, "Invalid slotStart value");
   }
 
   const normalizedStart = new Date(start);
   normalizedStart.setSeconds(0, 0);
 
   const now = new Date();
-  if (normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60000 <= now.getTime()) {
-    throw new HttpError(400, 'Slot must be in the future');
+  if (
+    normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60000 <=
+    now.getTime()
+  ) {
+    throw new HttpError(400, "Slot must be in the future");
   }
 
   // Bắt buộc phải có xe mặc định
@@ -270,13 +276,16 @@ exports.createBooking = asyncHandler(async (req, res) => {
   if (!defaultVehicle) {
     throw new HttpError(
       409,
-      'DEFAULT_VEHICLE_REQUIRED: You must register a vehicle and set a default vehicle before booking.'
+      "DEFAULT_VEHICLE_REQUIRED: You must register a vehicle and set a default vehicle before booking."
     );
   }
 
   // Nếu gửi vehicleId thì bắt buộc phải là xe mặc định
   if (vehicleId && vehicleId !== defaultVehicle.id) {
-    throw new HttpError(400, 'MUST_USE_DEFAULT_VEHICLE: You can only book with your default vehicle.');
+    throw new HttpError(
+      400,
+      "MUST_USE_DEFAULT_VEHICLE: You can only book with your default vehicle."
+    );
   }
 
   const wallet = await Wallet.findOne({ user_id: userId }).lean();
@@ -295,25 +304,13 @@ exports.createBooking = asyncHandler(async (req, res) => {
     status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
   }).lean();
 
-  if (userActiveBookings.length > 0) {
-    // Cho phép slot liên tiếp (cách nhau tối đa 5 phút)
-    const isConsecutiveSlot = userActiveBookings.some((b) => {
-      const diff = Math.abs(normalizedStart.getTime() - new Date(b.slotEnd).getTime());
-      return diff <= 5 * 60 * 1000;
-    });
-
-    if (!isConsecutiveSlot) {
-      throw new HttpError(
-        409,
-        'You already have an active booking. Only consecutive slots are allowed.'
-      );
-    }
-
-    // Không quá 2 slot liên tiếp
-    if (userActiveBookings.length >= 2) {
-      throw new HttpError(409, 'You can only book maximum 2 consecutive slots.');
-    }
-  }
+  // // Giới hạn tối đa 2 booking active cùng lúc
+  // if (userActiveBookings.length >= 2) {
+  //   throw new HttpError(
+  //     409,
+  //     "You can only have maximum 2 active bookings at a time."
+  //   );
+  // }
 
   // // Giới hạn 3 slot/ngày
   // const today = new Date();
@@ -331,8 +328,12 @@ exports.createBooking = asyncHandler(async (req, res) => {
   //   throw new HttpError(429, 'Daily limit reached. You can only book 3 slots per day.');
   // }
 
-  const slotEnd = new Date(normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60 * 1000);
-  const checkInDeadline = new Date(normalizedStart.getTime() + BOOKING_GRACE_MINUTES * 60 * 1000);
+  const slotEnd = new Date(
+    normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60 * 1000
+  );
+  const checkInDeadline = new Date(
+    normalizedStart.getTime() + BOOKING_GRACE_MINUTES * 60 * 1000
+  );
 
   // // Chống đặt chồng lấp trên cùng connector
   // const overlapping = await Booking.findOne({
@@ -400,7 +401,7 @@ exports.createBooking = asyncHandler(async (req, res) => {
     } else if (!["RESERVED", "CHARGING"].includes(connectorDoc.status)) {
       throw new HttpError(409, "Connector is not available for booking");
     }
-    
+
     const overlapping = await Booking.findOne({
       connectorId,
       status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
@@ -432,7 +433,6 @@ exports.createBooking = asyncHandler(async (req, res) => {
       );
     }
 
-
     const booking = await Booking.create({
       userId,
       stationId: connectorDoc.stationId,
@@ -452,23 +452,25 @@ exports.createBooking = asyncHandler(async (req, res) => {
     // NEW: notify user on creation
     await safeNotifyUser({
       userId,
-      title: 'Booking confirmed',
+      title: "Booking confirmed",
       body: `Your booking ${booking.id} is reserved for ${formatToVietnamTime(
         booking.slotStart
       )}. Please check in before ${formatToVietnamTime(checkInDeadline)}.`,
-      type: 'booking',
+      type: "booking",
       data: {
         bookingId: booking.id,
         status: booking.status,
         slotStart: formatToVietnamTime(booking.slotStart),
         slotEnd: formatToVietnamTime(booking.slotEnd),
-        stationId: booking.stationId?.toString?.() || connectorDoc.stationId?.toString?.(),
+        stationId:
+          booking.stationId?.toString?.() ||
+          connectorDoc.stationId?.toString?.(),
         connectorId: connectorDoc._id?.toString(),
       },
     });
 
     res.status(201).json({
-      message: 'Booking created successfully',
+      message: "Booking created successfully",
       booking: formatBookingDates(booking),
     });
   } catch (err) {
