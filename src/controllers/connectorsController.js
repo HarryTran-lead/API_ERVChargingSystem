@@ -25,7 +25,14 @@ const {
 } = require("../utils/timezoneHelpers");
 
 exports.createConnector = asyncHandler(async (req, res) => {
-  const { chargerId, status, code } = req.body;
+  const { chargerId, status, code, type, powerKw } = req.body;
+
+  if (type !== undefined || powerKw !== undefined) {
+    throw new HttpError(
+      400,
+      "Connector type and power are managed by the charger configuration"
+    );
+  }
   const charger = await Charger.findById(chargerId)
     .select("_id stationId connectorType powerKw")
     .lean();
@@ -119,7 +126,14 @@ exports.getConnector = asyncHandler(async (req, res) => {
 });
 
 exports.updateConnector = asyncHandler(async (req, res) => {
-  const { code } = req.body;
+  const { code, type, powerKw } = req.body;
+
+  if (type !== undefined || powerKw !== undefined) {
+    throw new HttpError(
+      400,
+      "Connector type and power are managed by the charger configuration"
+    );
+  }
   const connector = await Connector.findById(req.params.id);
   if (!connector) throw new HttpError(404, "Connector not found");
 
