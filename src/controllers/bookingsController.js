@@ -646,8 +646,8 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
 
   // Sinh slots mỗi 30'
   const slots = [];
-  const slotStartHour = 6; // 6 AM
-  const slotEndHour = 22; // 10 PM
+  const slotStartHour = 0; // 6 AM
+  const slotEndHour = 24; // 10 PM
 
   for (let hour = slotStartHour; hour < slotEndHour; hour++) {
     for (let minute = 0; minute < 60; minute += 30) {
@@ -697,21 +697,22 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
         }
       }
 
-      if (availableConnectors.length > 0) {
-        slots.push({
-          slotStart: slotStart.toISOString(),
-          slotEnd: slotEnd.toISOString(),
-          duration: Number(duration || BOOKING_SLOT_MINUTES),
-          availableConnectors,
-          station: {
-            id: connectors[0].stationId._id,
-            name: connectors[0].stationId.name,
-            lat: connectors[0].stationId.lat,
-            lng: connectors[0].stationId.lng,
-            status: connectors[0].stationId.status,
-          },
-        });
-      }
+      const isAvailable = availableConnectors.length > 0;
+
+      slots.push({
+        slotStart: slotStart.toISOString(),
+        slotEnd: slotEnd.toISOString(),
+        duration: Number(duration || BOOKING_SLOT_MINUTES),
+        isAvailable,
+        availableConnectors: isAvailable ? availableConnectors : [],
+        station: {
+          id: connectors[0].stationId._id,
+          name: connectors[0].stationId.name,
+          lat: connectors[0].stationId.lat,
+          lng: connectors[0].stationId.lng,
+          status: connectors[0].stationId.status,
+        },
+      });
     }
   }
 
