@@ -769,13 +769,21 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
       }
 
       const isAvailable = availableConnectors.length > 0;
+      
+      const availableCount = availableConnectors.length;
+      const totalConnectors = connectors.length;
+      const occupiedCount = Math.max(totalConnectors - availableCount, 0);
 
+      
       slots.push({
         slotStart: slotStart.toISOString(),
         slotEnd: slotEnd.toISOString(),
         duration: Number(duration || BOOKING_SLOT_MINUTES),
         isAvailable,
         availableConnectors: isAvailable ? availableConnectors : [],
+        availableCount,
+        totalConnectors,
+        occupiedCount,
         station: {
           id: connectors[0].stationId._id,
           name: connectors[0].stationId.name,
