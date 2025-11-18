@@ -6,6 +6,7 @@ const Connector = require('../models/Connector');
 const Vehicle = require('../models/Vehicle');
 const Wallet = require("../models/Wallet");
 const Station = require('../models/Station');
+const Charger = require("../models/Charger");
 const Tariff = require('../models/Tariff');
 const Session = require('../models/Session');
 const Invoice = require('../models/Invoice'); // NEW
@@ -494,8 +495,78 @@ exports.getMyBookings = asyncHandler(async (req, res) => {
   const userId = ensureRequestUserId(req);
   const bookings = await Booking.find({ userId }).sort({ slotStart: -1 }).lean();
 
+  const stationIds = new Set();
+  const connectorIds = new Set();
+
+  bookings.forEach((booking) => {
+    if (booking.stationId) {
+      stationIds.add(booking.stationId.toString());
+    }
+    if (booking.connectorId) {
+      connectorIds.add(booking.connectorId.toString());
+    }
+  });
+
+  const [stations, connectors] = await Promise.all([
+    stationIds.size
+      ? Station.find({ _id: { $in: Array.from(stationIds) } })
+          .select("name")
+          .lean()
+      : [],
+    connectorIds.size
+      ? Connector.find({ _id: { $in: Array.from(connectorIds) } })
+          .select("chargerId code")
+          .lean()
+      : [],
+  ]);
+
+  const stationNameMap = new Map(
+    stations.map((station) => [station._id.toString(), station.name])
+  );
+
+  const connectorMap = new Map(
+    connectors.map((connector) => [connector._id.toString(), connector])
+  );
+
+  const chargerIds = new Set();
+  connectors.forEach((connector) => {
+    if (connector.chargerId) {
+      chargerIds.add(connector.chargerId.toString());
+    }
+  });
+
+  const chargers = chargerIds.size
+    ? await Charger.find({ _id: { $in: Array.from(chargerIds) } })
+        .select("name")
+        .lean()
+    : [];
+
+  const chargerNameMap = new Map(
+    chargers.map((charger) => [charger._id.toString(), charger.name])
+  );
+
+  const formattedBookings = bookings.map((booking) => {
+    const formatted = formatBookingDates(booking);
+    const stationName = booking.stationId
+      ? stationNameMap.get(booking.stationId.toString()) || null
+      : null;
+    const connectorInfo = booking.connectorId
+      ? connectorMap.get(booking.connectorId.toString())
+      : null;
+    const chargerName = connectorInfo?.chargerId
+      ? chargerNameMap.get(connectorInfo.chargerId.toString()) || null
+      : null;
+
+    return {
+      ...formatted,
+      stationName,
+      chargerName,
+      connectorName: connectorInfo?.code || null,
+    };
+  });
+
   res.json({
-    bookings: bookings.map(formatBookingDates),
+    bookings: formattedBookings,
   });
 });
 
