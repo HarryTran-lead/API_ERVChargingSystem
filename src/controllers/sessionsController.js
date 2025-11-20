@@ -640,11 +640,31 @@ exports.stopSession = asyncHandler(async (req, res) => {
  * Query: status, userId, stationId, connectorId, from, to, search, page, limit, sort
  */
 exports.listSessions = asyncHandler(async (req, res) => {
-  const { status, userId, stationId, connectorId, from, to, search, page = 1, limit = 20, sort } = req.query;
+   const requester = ensureRequestUser(req);
+  const requesterId = ensureRequestUserId(req);
+  const {
+    status,
+    userId: rawUserId,
+    stationId,
+    connectorId,
+    from,
+    to,
+    search,
+    page = 1,
+    limit = 20,
+    sort,
+  } = req.query;
 
   const match = {};
-  if (status) match.status = { $in: parseStatuses(status) };
-  if (userId) match.userId = userId;
+ const statuses = parseStatuses(status);
+  if (statuses.length) match.status = { $in: statuses };
+
+  if (requester.role === ROLES.DRIVER) {
+    match.userId = requesterId;
+  } else if (rawUserId) {
+    match.userId = rawUserId;
+  }
+
   if (stationId) match.stationId = toObjectId(stationId);
   if (connectorId) match.connectorId = toObjectId(connectorId);
   if (from || to) {

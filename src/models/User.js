@@ -19,6 +19,20 @@ const userSchema = new mongoose.Schema({
     index: true
   },
   status: { type: String, enum: ['ACTIVE', 'SUSPENDED'], default: 'ACTIVE' },
+  password_reset_token: { type: String, default: null },
+  password_reset_expires: { type: Date, default: null },
+  password_changed_at: { type: Date, default: null },
+  notification_preferences: {
+    pushEnabled: { type: Boolean, default: true },
+    emailEnabled: { type: Boolean, default: true },
+    smsEnabled: { type: Boolean, default: false },
+    categories: {
+      booking: { type: Boolean, default: true },
+      session: { type: Boolean, default: true },
+      invoice: { type: Boolean, default: true },
+      marketing: { type: Boolean, default: false },
+    },
+  },
   created_at: { type: Date, default: Date.now }
 })
 

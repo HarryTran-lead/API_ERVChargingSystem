@@ -1,5 +1,7 @@
 const asyncHandler = require('../utils/asyncHandler');
 const Notification = require('../models/Notification');
+const NotificationDevice = require('../models/NotificationDevice');
+const User = require('../models/User');
 const { HttpError } = require('../utils/errors');
 const { ensureRequestUserId } = require('../utils/requestUser');
 const { formatNotification } = require('../services/notificationService');
@@ -82,4 +84,76 @@ exports.markAllNotificationsRead = asyncHandler(async (req, res) => {
     updated: result.modifiedCount || 0,
     unreadCount,
   });
+  });
+
+exports.registerDeviceToken = asyncHandler(async (req, res) => {
+  const userId = ensureRequestUserId(req);
+  const { token, platform = 'unknown', deviceId, enabled = true } = req.body || {};
+
+  if (!token) {
+    throw new HttpError(400, 'Device token is required');
+  }
+
+  const normalizedPlatform = typeof platform === 'string' ? platform.toLowerCase() : 'unknown';
+  const payload = {
+    userId,
+    platform: ['ios', 'android', 'web'].includes(normalizedPlatform)
+      ? normalizedPlatform
+      : 'unknown',
+    deviceId: deviceId || null,
+    enabled: Boolean(enabled),
+    lastUsedAt: new Date(),
+  };
+
+  const device = await NotificationDevice.findOneAndUpdate(
+    { token },
+    { $set: payload },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  );
+
+  res.json({ device });
+});
+
+exports.getNotificationPreferences = asyncHandler(async (req, res) => {
+  const userId = ensureRequestUserId(req);
+  const user = await User.findOne({ id: userId }).select('notification_preferences');
+  if (!user) {
+    throw new HttpError(404, 'User not found');
+  }
+
+  res.json({ preferences: user.notification_preferences || {} });
+});
+
+exports.updateNotificationPreferences = asyncHandler(async (req, res) => {
+  const userId = ensureRequestUserId(req);
+  const updates = {};
+
+  if (typeof req.body?.pushEnabled !== 'undefined') {
+    updates['notification_preferences.pushEnabled'] = Boolean(req.body.pushEnabled);
+  }
+  if (typeof req.body?.emailEnabled !== 'undefined') {
+    updates['notification_preferences.emailEnabled'] = Boolean(req.body.emailEnabled);
+  }
+  if (typeof req.body?.smsEnabled !== 'undefined') {
+    updates['notification_preferences.smsEnabled'] = Boolean(req.body.smsEnabled);
+  }
+
+  if (req.body?.categories && typeof req.body.categories === 'object') {
+    const { booking, session, invoice, marketing } = req.body.categories;
+    if (typeof booking !== 'undefined') updates['notification_preferences.categories.booking'] = Boolean(booking);
+    if (typeof session !== 'undefined') updates['notification_preferences.categories.session'] = Boolean(session);
+    if (typeof invoice !== 'undefined') updates['notification_preferences.categories.invoice'] = Boolean(invoice);
+    if (typeof marketing !== 'undefined') updates['notification_preferences.categories.marketing'] = Boolean(marketing);
+  }
+
+  if (Object.keys(updates).length === 0) {
+    throw new HttpError(400, 'No preference changes provided');
+  }
+
+  const user = await User.findOneAndUpdate({ id: userId }, { $set: updates }, { new: true }).select('notification_preferences');
+  if (!user) {
+    throw new HttpError(404, 'User not found');
+  }
+
+  res.json({ preferences: user.notification_preferences || {} });
 });

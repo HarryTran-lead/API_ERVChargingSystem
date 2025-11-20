@@ -9,5 +9,6 @@ router.use(protect([ROLES.DRIVER, ROLES.ADMIN, ROLES.STAFF]));
 router.post("/start", sessionsController.startImmediateCharge);
 router.post("/:id/stop", sessionsController.stopSession);
 router.get("/:id", sessionsController.getSession);
+router.get('/', sessionsController.listSessions);
 
 module.exports = router;
