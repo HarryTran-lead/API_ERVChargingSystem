@@ -672,6 +672,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
     stationId,
     date,
     connectorType,
+    chargerId,
     duration = BOOKING_SLOT_MINUTES,
   } = req.query;
 
@@ -694,6 +695,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
   // const connectorFilter = { stationId, status: { $ne: 'OFFLINE' } };
   // Lọc connector theo station + trạng thái không OFFLINE (+ loại nếu có)
   const connectorFilter = { stationId, status: { $ne: "OFFLINE" } };
+  if (chargerId) connectorFilter.chargerId = chargerId;
   if (connectorType) connectorFilter.type = connectorType;
 
   const connectors = await Connector.find(connectorFilter)
@@ -713,6 +715,9 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
     stationId,
     status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
     slotStart: { $gte: startOfDay, $lte: endOfDay },
+    ...(chargerId
+      ? { connectorId: { $in: connectors.map((c) => c._id) } }
+      : {}),
   }).lean();
 
 const connectorTypes = [
