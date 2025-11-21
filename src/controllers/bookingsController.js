@@ -715,6 +715,35 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
     slotStart: { $gte: startOfDay, $lte: endOfDay },
   }).lean();
 
+const connectorTypes = [
+  ...new Set(connectors.map((connector) => connector.type)),
+];
+const tariffs = await Tariff.find({
+  stationId,
+  connectorType: { $in: connectorTypes },
+  active: true,
+  effectiveFrom: { $lte: endOfDay },
+})
+  .sort({ connectorType: 1, effectiveFrom: -1 })
+  .lean();
+
+const tariffsByType = connectorTypes.reduce((acc, type) => {
+  acc.set(type, []);
+  return acc;
+}, new Map());
+
+tariffs.forEach((tariff) => {
+  if (tariffsByType.has(tariff.connectorType)) {
+    tariffsByType.get(tariff.connectorType).push(tariff);
+  }
+});
+
+const getTariffForType = (type, at) => {
+  const list = tariffsByType.get(type) || [];
+  return list.find((tariff) => new Date(tariff.effectiveFrom) <= at) || null;
+};
+
+
   // Sinh slots mỗi 30'
   const slots = [];
   const slotStartHour = 0; // 6 AM
@@ -744,11 +773,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
         });
 
         if (!hasOverlap) {
-          const tariff = await Tariff.findEffectiveAt(
-            stationId,
-            connector.type,
-            slotStart
-          );
+          const tariff = getTariffForType(connector.type, slotStart);
 
           availableConnectors.push({
             connectorId: connector._id,
