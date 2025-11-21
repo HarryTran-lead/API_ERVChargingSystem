@@ -761,62 +761,61 @@ const getTariffForType = (type, at) => {
         slotEnd.getMinutes() + Number(duration || BOOKING_SLOT_MINUTES)
       );
 
-      const availableConnectors = [];
+            const slotConnectors = connectors.map((connector) => {
+              const hasOverlap = existingBookings.some((b) => {
+                return (
+                  b.connectorId.toString() === connector._id.toString() &&
+                  b.slotStart < slotEnd &&
+                  new Date(b.slotEnd) > slotStart
+                );
+              });
 
-      for (const connector of connectors) {
-        const hasOverlap = existingBookings.some((b) => {
-          return (
-            b.connectorId.toString() === connector._id.toString() &&
-            b.slotStart < slotEnd &&
-            new Date(b.slotEnd) > slotStart
-          );
-        });
+              const isAvailable = !hasOverlap;
+              const tariff = isAvailable
+                ? getTariffForType(connector.type, slotStart)
+                : null;
 
-        if (!hasOverlap) {
-          const tariff = getTariffForType(connector.type, slotStart);
+              return {
+                connectorId: connector._id.toString(),
+                connectorCode: connector.code,
+                type: connector.type,
+                powerKw: connector.powerKw,
+                isAvailable,
+                pricing: tariff
+                  ? {
+                      pricePerMin: tariff.pricePerMin,
+                      pricePerKwh: tariff.pricePerKwh,
+                      idleFeePerMin: tariff.idleFeePerMin,
+                      currency: "VND",
+                      mode: tariff.mode,
+                    }
+                  : null,
+              };
+            });
 
-          availableConnectors.push({
-            connectorId: connector._id,
-            connectorCode: connector.code,
-            type: connector.type,
-            powerKw: connector.powerKw,
-            pricing: tariff
-              ? {
-                  pricePerMin: tariff.pricePerMin,
-                  pricePerKwh: tariff.pricePerKwh,
-                  idleFeePerMin: tariff.idleFeePerMin,
-                  currency: "VND",
-                  mode: tariff.mode,
-                }
-              : null,
-          });
-        }
-      }
+            const availableCount = slotConnectors.filter(
+              (c) => c.isAvailable
+            ).length;
+            const occupiedCount = slotConnectors.length - availableCount;
+            const isSlotAvailable = availableCount > 0;
 
-      const isAvailable = availableConnectors.length > 0;
-      
-      const availableCount = availableConnectors.length;
-      const totalConnectors = connectors.length;
-      const occupiedCount = Math.max(totalConnectors - availableCount, 0);
-
-      
-      slots.push({
-        slotStart: slotStart.toISOString(),
-        slotEnd: slotEnd.toISOString(),
-        duration: Number(duration || BOOKING_SLOT_MINUTES),
-        isAvailable,
-        availableConnectors: isAvailable ? availableConnectors : [],
-        availableCount,
-        totalConnectors,
-        occupiedCount,
-        station: {
-          id: connectors[0].stationId._id,
-          name: connectors[0].stationId.name,
-          lat: connectors[0].stationId.lat,
-          lng: connectors[0].stationId.lng,
-          status: connectors[0].stationId.status,
-        },
-      });
+            slots.push({
+              slotStart: slotStart.toISOString(),
+              slotEnd: slotEnd.toISOString(),
+              duration: Number(duration || BOOKING_SLOT_MINUTES),
+              isAvailable: isSlotAvailable,
+              availableCount,
+              occupiedCount,
+              totalConnectors: connectors.length,
+              connectors: slotConnectors, // ← tất cả connector, có trạng thái
+              station: {
+                id: connectors[0].stationId._id.toString(),
+                name: connectors[0].stationId.name,
+                lat: connectors[0].stationId.lat,
+                lng: connectors[0].stationId.lng,
+                status: connectors[0].stationId.status,
+              },
+            });
     }
   }
 
