@@ -112,6 +112,21 @@ const SessionSchema = new mongoose.Schema(
         idleRatePerMin: { type: Number, default: 0 },
         idleBillableMinutes: { type: Number, default: 0 },
       },
+      pricing: {
+        mode: { type: String },
+        baseRates: {
+          pricePerMin: { type: Number, default: 0 },
+          pricePerKwh: { type: Number, default: 0 },
+          idleFeePerMin: { type: Number, default: 0 },
+          graceMin: { type: Number, default: 0 },
+        },
+        appliedRates: {
+          pricePerMin: { type: Number, default: 0 },
+          pricePerKwh: { type: Number, default: 0 },
+          idleFeePerMin: { type: Number, default: 0 },
+          graceMin: { type: Number, default: 0 },
+        },
+      },
       membership: {
         planCode: { type: String },
         planName: { type: String },

@@ -461,13 +461,34 @@ async function completeSession(session, options = {}) {
     idleAmount,
     currency,
   });
+ const pricingBaseRates = {
+    pricePerMin: toNumber(session.pricing?.baseRates?.pricePerMin, pricePerMin),
+    pricePerKwh: toNumber(session.pricing?.baseRates?.pricePerKwh, pricePerKwh),
+    idleFeePerMin: toNumber(
+      session.pricing?.baseRates?.idleFeePerMin,
+      idleRatePerMin
+    ),
+    graceMin: toNumber(session.pricing?.baseRates?.graceMin, graceMin),
+  };
 
+  const pricingAppliedRates = {
+    pricePerMin,
+    pricePerKwh,
+    idleFeePerMin: idleRatePerMin,
+    graceMin,
+  };
   session.billing = {
     chargingAmount,
     idleAmount,
     totalAmount: chargingAmount + idleAmount,
     currency,
     breakdown,
+     pricing: {
+      mode: pricingModeRaw || null,
+      baseRates: pricingBaseRates,
+      appliedRates: pricingAppliedRates,
+    },
+  };
   };
   if (membershipBilling) {
     session.billing.membership = membershipBilling;
@@ -531,6 +552,7 @@ async function completeSession(session, options = {}) {
             totalAmount: total,
             currency,
             breakdown,
+             pricing: session.billing?.pricing || null,
             membershipComparison: invoiceMembershipMeta
               ? {
                   before:
