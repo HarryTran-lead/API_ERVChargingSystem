@@ -9,7 +9,7 @@ const Station = require('../models/Station');
 const Charger = require("../models/Charger");
 const Tariff = require('../models/Tariff');
 const Session = require('../models/Session');
-const Invoice = require('../models/Invoice'); // NEW
+const Invoice = require('../models/Invoice');
 
 const asyncHandler = require('../utils/asyncHandler');
 const { HttpError } = require('../utils/errors');
@@ -313,6 +313,40 @@ exports.createBooking = asyncHandler(async (req, res) => {
   //   );
   // }
 
+  // Kiểm tra xem user/vehicle đã có booking nào với cùng slot time chưa (bất kể trạm nào)
+  // Ràng buộc: một xe không thể book cùng một giờ ở nhiều trạm khác nhau
+  const slotEnd = new Date(
+    normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60 * 1000
+  );
+  
+  const conflictingBooking = await Booking.findOne({
+    userId,
+    status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
+    // Check for overlapping slot time (same slot time or overlapping)
+    $or: [
+      // Exact same slot time
+      {
+        slotStart: normalizedStart,
+      },
+      // Overlapping slot times
+      {
+        slotStart: { $lt: slotEnd },
+        slotEnd: { $gt: normalizedStart },
+      },
+    ],
+  }).lean();
+
+  if (conflictingBooking) {
+    const conflictStation = await Station.findById(conflictingBooking.stationId).lean();
+    const conflictStationName = conflictStation?.name || 'Unknown Station';
+    const conflictTime = formatToVietnamTime(conflictingBooking.slotStart);
+    
+    throw new HttpError(
+      409,
+      `VEHICLE_ALREADY_BOOKED: Your vehicle is already booked for this time slot (${conflictTime}) at ${conflictStationName}. You cannot book the same time slot at another station.`
+    );
+  }
+
   // // Giới hạn 3 slot/ngày
   // const today = new Date();
   // today.setHours(0, 0, 0, 0);
@@ -329,9 +363,6 @@ exports.createBooking = asyncHandler(async (req, res) => {
   //   throw new HttpError(429, 'Daily limit reached. You can only book 3 slots per day.');
   // }
 
-  const slotEnd = new Date(
-    normalizedStart.getTime() + BOOKING_SLOT_MINUTES * 60 * 1000
-  );
   const checkInDeadline = new Date(
     normalizedStart.getTime() + BOOKING_GRACE_MINUTES * 60 * 1000
   );

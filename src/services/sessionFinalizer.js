@@ -483,13 +483,13 @@ async function completeSession(session, options = {}) {
     totalAmount: chargingAmount + idleAmount,
     currency,
     breakdown,
-     pricing: {
+    pricing: {
       mode: pricingModeRaw || null,
       baseRates: pricingBaseRates,
       appliedRates: pricingAppliedRates,
     },
   };
-  };
+  
   if (membershipBilling) {
     session.billing.membership = membershipBilling;
   }
@@ -552,7 +552,7 @@ async function completeSession(session, options = {}) {
             totalAmount: total,
             currency,
             breakdown,
-             pricing: session.billing?.pricing || null,
+            pricing: session.billing?.pricing || null,
             membershipComparison: invoiceMembershipMeta
               ? {
                   before:
