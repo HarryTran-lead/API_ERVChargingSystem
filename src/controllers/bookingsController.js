@@ -672,6 +672,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
     stationId,
     date,
     connectorType,
+    chargerId,
     duration = BOOKING_SLOT_MINUTES,
   } = req.query;
 
@@ -694,6 +695,7 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
   // const connectorFilter = { stationId, status: { $ne: 'OFFLINE' } };
   // Lọc connector theo station + trạng thái không OFFLINE (+ loại nếu có)
   const connectorFilter = { stationId, status: { $ne: "OFFLINE" } };
+  if (chargerId) connectorFilter.chargerId = chargerId;
   if (connectorType) connectorFilter.type = connectorType;
 
   const connectors = await Connector.find(connectorFilter)
@@ -713,7 +715,39 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
     stationId,
     status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
     slotStart: { $gte: startOfDay, $lte: endOfDay },
+    ...(chargerId
+      ? { connectorId: { $in: connectors.map((c) => c._id) } }
+      : {}),
   }).lean();
+
+const connectorTypes = [
+  ...new Set(connectors.map((connector) => connector.type)),
+];
+const tariffs = await Tariff.find({
+  stationId,
+  connectorType: { $in: connectorTypes },
+  active: true,
+  effectiveFrom: { $lte: endOfDay },
+})
+  .sort({ connectorType: 1, effectiveFrom: -1 })
+  .lean();
+
+const tariffsByType = connectorTypes.reduce((acc, type) => {
+  acc.set(type, []);
+  return acc;
+}, new Map());
+
+tariffs.forEach((tariff) => {
+  if (tariffsByType.has(tariff.connectorType)) {
+    tariffsByType.get(tariff.connectorType).push(tariff);
+  }
+});
+
+const getTariffForType = (type, at) => {
+  const list = tariffsByType.get(type) || [];
+  return list.find((tariff) => new Date(tariff.effectiveFrom) <= at) || null;
+};
+
 
   // Sinh slots mỗi 30'
   const slots = [];
@@ -732,66 +766,61 @@ exports.getAvailableSlots = asyncHandler(async (req, res) => {
         slotEnd.getMinutes() + Number(duration || BOOKING_SLOT_MINUTES)
       );
 
-      const availableConnectors = [];
+            const slotConnectors = connectors.map((connector) => {
+              const hasOverlap = existingBookings.some((b) => {
+                return (
+                  b.connectorId.toString() === connector._id.toString() &&
+                  b.slotStart < slotEnd &&
+                  new Date(b.slotEnd) > slotStart
+                );
+              });
 
-      for (const connector of connectors) {
-        const hasOverlap = existingBookings.some((b) => {
-          return (
-            b.connectorId.toString() === connector._id.toString() &&
-            b.slotStart < slotEnd &&
-            new Date(b.slotEnd) > slotStart
-          );
-        });
+              const isAvailable = !hasOverlap;
+              const tariff = isAvailable
+                ? getTariffForType(connector.type, slotStart)
+                : null;
 
-        if (!hasOverlap) {
-          const tariff = await Tariff.findEffectiveAt(
-            stationId,
-            connector.type,
-            slotStart
-          );
+              return {
+                connectorId: connector._id.toString(),
+                connectorCode: connector.code,
+                type: connector.type,
+                powerKw: connector.powerKw,
+                isAvailable,
+                pricing: tariff
+                  ? {
+                      pricePerMin: tariff.pricePerMin,
+                      pricePerKwh: tariff.pricePerKwh,
+                      idleFeePerMin: tariff.idleFeePerMin,
+                      currency: "VND",
+                      mode: tariff.mode,
+                    }
+                  : null,
+              };
+            });
 
-          availableConnectors.push({
-            connectorId: connector._id,
-            connectorCode: connector.code,
-            type: connector.type,
-            powerKw: connector.powerKw,
-            pricing: tariff
-              ? {
-                  pricePerMin: tariff.pricePerMin,
-                  pricePerKwh: tariff.pricePerKwh,
-                  idleFeePerMin: tariff.idleFeePerMin,
-                  currency: "VND",
-                  mode: tariff.mode,
-                }
-              : null,
-          });
-        }
-      }
+            const availableCount = slotConnectors.filter(
+              (c) => c.isAvailable
+            ).length;
+            const occupiedCount = slotConnectors.length - availableCount;
+            const isSlotAvailable = availableCount > 0;
 
-      const isAvailable = availableConnectors.length > 0;
-      
-      const availableCount = availableConnectors.length;
-      const totalConnectors = connectors.length;
-      const occupiedCount = Math.max(totalConnectors - availableCount, 0);
-
-      
-      slots.push({
-        slotStart: slotStart.toISOString(),
-        slotEnd: slotEnd.toISOString(),
-        duration: Number(duration || BOOKING_SLOT_MINUTES),
-        isAvailable,
-        availableConnectors: isAvailable ? availableConnectors : [],
-        availableCount,
-        totalConnectors,
-        occupiedCount,
-        station: {
-          id: connectors[0].stationId._id,
-          name: connectors[0].stationId.name,
-          lat: connectors[0].stationId.lat,
-          lng: connectors[0].stationId.lng,
-          status: connectors[0].stationId.status,
-        },
-      });
+            slots.push({
+              slotStart: slotStart.toISOString(),
+              slotEnd: slotEnd.toISOString(),
+              duration: Number(duration || BOOKING_SLOT_MINUTES),
+              isAvailable: isSlotAvailable,
+              availableCount,
+              occupiedCount,
+              totalConnectors: connectors.length,
+              connectors: slotConnectors, // ← tất cả connector, có trạng thái
+              station: {
+                id: connectors[0].stationId._id.toString(),
+                name: connectors[0].stationId.name,
+                lat: connectors[0].stationId.lat,
+                lng: connectors[0].stationId.lng,
+                status: connectors[0].stationId.status,
+              },
+            });
     }
   }
 
