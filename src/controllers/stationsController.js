@@ -67,7 +67,7 @@ exports.listStations = asyncHandler(async (req, res) => {
         },
       };
       // MongoDB 5.0+ requires sort() with $near operator
-      query = Station.find(filter).sort({ location: "2dsphere" });
+      query = Station.find(filter).sort({ location: 1 });
     }
   }
 
@@ -137,7 +137,7 @@ exports.listStationsWithAssets = asyncHandler(async (req, res) => {
         },
       };
       // MongoDB 5.0+ requires sort() with $near operator
-      query = Station.find(filter).sort({ location: "2dsphere" });
+      query = Station.find(filter).sort({ location: 1 });
     }
   }
 
