@@ -210,10 +210,7 @@ const buildMembershipBillingDetails = (session, context = {}) => {
       baseBilling.chargingAmount - discountedBilling.chargingAmount
     ),
     idle: Math.max(0, baseBilling.idleAmount - discountedBilling.idleAmount),
-    total: Math.max(
-      0,
-      baseBilling.totalAmount - discountedBilling.totalAmount
-    ),
+    total: Math.max(0, baseBilling.totalAmount - discountedBilling.totalAmount),
   };
 
   const adjustments = [];
@@ -461,7 +458,7 @@ async function completeSession(session, options = {}) {
     idleAmount,
     currency,
   });
- const pricingBaseRates = {
+  const pricingBaseRates = {
     pricePerMin: toNumber(session.pricing?.baseRates?.pricePerMin, pricePerMin),
     pricePerKwh: toNumber(session.pricing?.baseRates?.pricePerKwh, pricePerKwh),
     idleFeePerMin: toNumber(
@@ -483,13 +480,13 @@ async function completeSession(session, options = {}) {
     totalAmount: chargingAmount + idleAmount,
     currency,
     breakdown,
-     pricing: {
+    pricing: {
       mode: pricingModeRaw || null,
       baseRates: pricingBaseRates,
       appliedRates: pricingAppliedRates,
     },
   };
-  };
+
   if (membershipBilling) {
     session.billing.membership = membershipBilling;
   }
@@ -552,11 +549,10 @@ async function completeSession(session, options = {}) {
             totalAmount: total,
             currency,
             breakdown,
-             pricing: session.billing?.pricing || null,
+            pricing: session.billing?.pricing || null,
             membershipComparison: invoiceMembershipMeta
               ? {
-                  before:
-                    invoiceMembershipMeta.billingBeforePackage || null,
+                  before: invoiceMembershipMeta.billingBeforePackage || null,
                   after: invoiceMembershipMeta.billingAfterPackage || null,
                   savings: invoiceMembershipMeta.savings || null,
                   adjustments: invoiceMembershipMeta.adjustments || [],
