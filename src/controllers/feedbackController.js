@@ -120,9 +120,50 @@ exports.getAllFeedbacks = asyncHandler(async (req, res) => {
     filter.handledBy = handledBy.trim();
   }
 
-  const feedbacks = await Feedback.find(filter)
-    .sort({ createdAt: -1 })
-    .lean();
+  // Use aggregation to populate user
+  const pipeline = [
+    { $match: filter },
+    {
+      $lookup: {
+        from: 'users',
+        localField: 'userId',
+        foreignField: 'id',
+        as: 'user',
+      },
+    },
+    { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+    { $sort: { createdAt: -1 } },
+    {
+      $project: {
+        id: 1,
+        userId: 1,
+        bookingId: 1,
+        rating: 1,
+        comment: 1,
+        status: 1,
+        note: 1,
+        handledBy: 1,
+        handledAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        user: {
+          $cond: {
+            if: { $ne: ['$user', null] },
+            then: {
+              id: '$user.id',
+              name: '$user.name',
+              fullName: '$user.fullName',
+              email: '$user.email',
+              phone: '$user.phone',
+            },
+            else: null,
+          },
+        },
+      },
+    },
+  ];
+
+  const feedbacks = await Feedback.aggregate(pipeline);
 
   res.json({ feedbacks });
 });

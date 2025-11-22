@@ -485,214 +485,363 @@ exports.listCompatibleStationsForVehicle = asyncHandler(async (req, res) => {
 /* ============================================================================
  * List stations that have available connectors for a given time window
  * ==========================================================================*/
+// exports.listAvailableStationsByTime = asyncHandler(async (req, res) => {
+//   const {
+//     startTime,
+//     durationMinutes = BOOKING_SLOT_MINUTES,
+//     connectorType,
+//     stationId,
+//     stationStatus,
+//   } = req.query;
+
+//   if (!startTime) {
+//     throw new HttpError(400, "startTime is required");
+//   }
+
+//   const slotStart = new Date(startTime);
+//   if (Number.isNaN(slotStart.getTime())) {
+//     throw new HttpError(400, "Invalid startTime format");
+//   }
+
+//   const duration = Number(durationMinutes);
+//   if (!Number.isFinite(duration) || duration <= 0) {
+//     throw new HttpError(400, "durationMinutes must be a positive number");
+//   }
+
+//   const slotEnd = new Date(slotStart.getTime() + duration * 60000);
+
+//   const { stationObjectId } = resolveStaffStationScope(req);
+
+//   const connectorFilter = { status: { $ne: "OFFLINE" } };
+//   if (stationObjectId) {
+//     connectorFilter.stationId = stationObjectId;
+//   } else if (stationId) {
+//     connectorFilter.stationId = stationId;
+//   }
+//   if (connectorType) connectorFilter.type = connectorType;
+
+//   const connectors = await Connector.find(connectorFilter)
+//     .select("_id stationId chargerId type powerKw code status")
+//     .lean();
+
+//   if (connectors.length === 0) {
+//     return res.json({
+//       slot: {
+//         start: slotStart.toISOString(),
+//         end: slotEnd.toISOString(),
+//         durationMinutes: duration,
+//       },
+//       stations: [],
+//     });
+//   }
+
+//   const connectorIds = connectors.map((conn) => conn._id);
+
+//   const overlappingBookings = await Booking.find({
+//     connectorId: { $in: connectorIds },
+//     status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
+//     slotStart: { $lt: slotEnd },
+//     slotEnd: { $gt: slotStart },
+//   })
+//     .select("connectorId")
+//     .lean();
+
+//   const busyConnectorIds = new Set(
+//     overlappingBookings
+//       .map((bk) => bk.connectorId?.toString())
+//       .filter(Boolean)
+//   );
+
+//   const availableConnectors = connectors.filter(
+//     (conn) => conn.stationId && !busyConnectorIds.has(conn._id.toString())
+//   );
+
+//   if (availableConnectors.length === 0) {
+//     return res.json({
+//       slot: {
+//         start: slotStart.toISOString(),
+//         end: slotEnd.toISOString(),
+//         durationMinutes: duration,
+//       },
+//       stations: [],
+//     });
+//   }
+
+//   const uniqueStationIds = [
+//     ...new Set(
+//       availableConnectors
+//         .map((conn) => conn.stationId?.toString())
+//         .filter(Boolean)
+//     ),
+//   ];
+
+//   const stationObjectIds = uniqueStationIds
+//     .filter((id) => mongoose.Types.ObjectId.isValid(id))
+//     .map((id) => new mongoose.Types.ObjectId(id));
+
+//   if (stationObjectIds.length === 0) {
+//     return res.json({
+//       slot: {
+//         start: slotStart.toISOString(),
+//         end: slotEnd.toISOString(),
+//         durationMinutes: duration,
+//       },
+//       stations: [],
+//     });
+//   }
+
+//   const stationFilter = { _id: { $in: stationObjectIds } };
+//   if (stationObjectId) {
+//     stationFilter._id = stationObjectId;
+//   }
+//   if (stationStatus) stationFilter.status = stationStatus;
+
+//   const stations = await Station.find(stationFilter)
+//     .select("_id name lat lng status")
+//     .lean();
+
+//   if (stations.length === 0) {
+//     return res.json({
+//       slot: {
+//         start: slotStart.toISOString(),
+//         end: slotEnd.toISOString(),
+//         durationMinutes: duration,
+//       },
+//       stations: [],
+//     });
+//   }
+
+//   const allowedStationIds = new Set(stations.map((st) => st._id.toString()));
+
+//   const connectorsByStation = new Map();
+//   availableConnectors.forEach((conn) => {
+//     const stationIdStr = conn.stationId.toString();
+//     if (!allowedStationIds.has(stationIdStr)) return;
+//     if (!connectorsByStation.has(stationIdStr)) {
+//       connectorsByStation.set(stationIdStr, []);
+//     }
+//     connectorsByStation.get(stationIdStr).push(conn);
+//   });
+
+//   const tariffCache = new Map();
+//   const tariffLookups = [];
+
+//   connectorsByStation.forEach((connectorList, stationIdStr) => {
+//     connectorList.forEach((conn) => {
+//       const key = `${stationIdStr}_${conn.type}`;
+//       if (tariffCache.has(key)) return;
+//       tariffCache.set(key, null);
+//       tariffLookups.push({ key, stationId: conn.stationId, connectorType: conn.type });
+//     });
+//   });
+
+//   await Promise.all(
+//     tariffLookups.map(async ({ key, stationId: stId, connectorType }) => {
+//       const tariff = await Tariff.findEffectiveAt(stId, connectorType, slotStart);
+//       tariffCache.set(key, tariff || null);
+//     })
+//   );
+
+//   const stationMap = new Map(stations.map((st) => [st._id.toString(), st]));
+
+//   const stationsPayload = [];
+
+//   connectorsByStation.forEach((connectorList, stationIdStr) => {
+//     const station = stationMap.get(stationIdStr);
+//     if (!station) return;
+
+//     const connectorsPayload = connectorList.map((conn) => {
+//       const key = `${stationIdStr}_${conn.type}`;
+//       const tariff = tariffCache.get(key);
+//       const pricing = tariff
+//         ? {
+//             pricePerMin: tariff.pricePerMin,
+//             pricePerKwh: tariff.pricePerKwh,
+//             idleFeePerMin: tariff.idleFeePerMin,
+//             currency: "VND",
+//             mode: tariff.mode,
+//           }
+//         : null;
+
+//       return {
+//         id: conn._id,
+//         code: conn.code,
+//         type: conn.type,
+//         powerKw: conn.powerKw,
+//         pricing,
+//       };
+//     });
+
+//     stationsPayload.push({
+//       id: station._id,
+//       name: station.name,
+//       lat: station.lat,
+//       lng: station.lng,
+//       status: station.status,
+//       availableConnectorCount: connectorsPayload.length,
+//       availableConnectors: connectorsPayload,
+//     });
+//   });
+
+//   res.json({
+//     slot: {
+//       start: slotStart.toISOString(),
+//       end: slotEnd.toISOString(),
+//       durationMinutes: duration,
+//     },
+//     stations: stationsPayload,
+//   });
+// });
 exports.listAvailableStationsByTime = asyncHandler(async (req, res) => {
   const {
     startTime,
-    durationMinutes = BOOKING_SLOT_MINUTES,
+    durationMinutes = 30,
     connectorType,
     stationId,
     stationStatus,
+    chargerId, // Thêm để lọc theo charger
   } = req.query;
 
+  // Validate params
   if (!startTime) {
-    throw new HttpError(400, "startTime is required");
+    throw new HttpError(
+      400,
+      "startTime is required (ISO string, e.g., 2025-11-22T10:00:00Z)"
+    );
   }
-
-  const slotStart = new Date(startTime);
-  if (Number.isNaN(slotStart.getTime())) {
+  const start = new Date(startTime);
+  if (Number.isNaN(start.getTime())) {
     throw new HttpError(400, "Invalid startTime format");
   }
-
   const duration = Number(durationMinutes);
-  if (!Number.isFinite(duration) || duration <= 0) {
+  if (isNaN(duration) || duration <= 0) {
     throw new HttpError(400, "durationMinutes must be a positive number");
   }
+  const endTime = new Date(start.getTime() + duration * 60 * 1000);
 
-  const slotEnd = new Date(slotStart.getTime() + duration * 60000);
-
-  const { stationObjectId } = resolveStaffStationScope(req);
-
-  const connectorFilter = { status: { $ne: "OFFLINE" } };
-  if (stationObjectId) {
-    connectorFilter.stationId = stationObjectId;
-  } else if (stationId) {
-    connectorFilter.stationId = stationId;
+  // Build match for connectors
+  const match = {
+    status: { $ne: "OFFLINE" }, // Chỉ available connectors
+  };
+  if (stationId && mongoose.Types.ObjectId.isValid(stationId)) {
+    match.stationId = new mongoose.Types.ObjectId(stationId);
   }
-  if (connectorType) connectorFilter.type = connectorType;
+  if (connectorType) {
+    match.type = connectorType;
+  }
+  if (chargerId && mongoose.Types.ObjectId.isValid(chargerId)) {
+    match.chargerId = new mongoose.Types.ObjectId(chargerId); // Lọc đúng trụ
+  }
 
-  const connectors = await Connector.find(connectorFilter)
-    .select("_id stationId chargerId type powerKw code status")
-    .lean();
-
-  if (connectors.length === 0) {
-    return res.json({
-      slot: {
-        start: slotStart.toISOString(),
-        end: slotEnd.toISOString(),
-        durationMinutes: duration,
+  // Aggregation pipeline
+  const pipeline = [
+    { $match: match },
+    // Lookup station để filter status
+    {
+      $lookup: {
+        from: "stations",
+        localField: "stationId",
+        foreignField: "_id",
+        as: "station",
       },
-      stations: [],
-    });
-  }
-
-  const connectorIds = connectors.map((conn) => conn._id);
-
-  const overlappingBookings = await Booking.find({
-    connectorId: { $in: connectorIds },
-    status: { $in: [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN] },
-    slotStart: { $lt: slotEnd },
-    slotEnd: { $gt: slotStart },
-  })
-    .select("connectorId")
-    .lean();
-
-  const busyConnectorIds = new Set(
-    overlappingBookings
-      .map((bk) => bk.connectorId?.toString())
-      .filter(Boolean)
-  );
-
-  const availableConnectors = connectors.filter(
-    (conn) => conn.stationId && !busyConnectorIds.has(conn._id.toString())
-  );
-
-  if (availableConnectors.length === 0) {
-    return res.json({
-      slot: {
-        start: slotStart.toISOString(),
-        end: slotEnd.toISOString(),
-        durationMinutes: duration,
+    },
+    { $unwind: { path: "$station", preserveNullAndEmptyArrays: false } },
+    // Filter station status
+    ...(stationStatus ? [{ $match: { "station.status": stationStatus } }] : []),
+    // Lookup bookings để check overlap
+    {
+      $lookup: {
+        from: "bookings",
+        let: { connectorId: "$_id" },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ["$connectorId", "$$connectorId"] },
+                  {
+                    $in: [
+                      "$status",
+                      [BOOKING_STATUS.RESERVED, BOOKING_STATUS.CHECKED_IN],
+                    ],
+                  },
+                  {
+                    $or: [
+                      {
+                        $and: [
+                          { $lt: ["$slotStart", endTime] },
+                          { $gte: ["$slotStart", start] },
+                        ],
+                      },
+                      {
+                        $and: [
+                          { $gt: ["$slotEnd", start] },
+                          { $lte: ["$slotEnd", endTime] },
+                        ],
+                      },
+                      {
+                        $and: [
+                          { $lte: ["$slotStart", start] },
+                          { $gte: ["$slotEnd", endTime] },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        ],
+        as: "overlappingBookings",
       },
-      stations: [],
-    });
-  }
-
-  const uniqueStationIds = [
-    ...new Set(
-      availableConnectors
-        .map((conn) => conn.stationId?.toString())
-        .filter(Boolean)
-    ),
+    },
+    // Không lọc ra booked connectors, mà thêm flag isAvailable
+    // { $match: { overlappingBookings: { $size: 0 } } }, // Remove this
+    // Lookup charger
+    {
+      $lookup: {
+        from: "chargers",
+        localField: "chargerId",
+        foreignField: "_id",
+        as: "charger",
+      },
+    },
+    { $unwind: { path: "$charger", preserveNullAndEmptyArrays: true } },
+    // Project output với isAvailable
+    {
+      $project: {
+        id: "$_id",
+        code: 1,
+        type: 1,
+        powerKw: 1,
+        status: 1,
+        isAvailable: { $eq: [{ $size: "$overlappingBookings" }, 0] }, // Thêm flag
+        charger: {
+          id: "$charger._id",
+          name: "$charger.name",
+          code: "$charger.code",
+        },
+        station: {
+          id: "$station._id",
+          name: "$station.name",
+          code: "$station.code",
+          status: "$station.status",
+        },
+      },
+    },
   ];
 
-  const stationObjectIds = uniqueStationIds
-    .filter((id) => mongoose.Types.ObjectId.isValid(id))
-    .map((id) => new mongoose.Types.ObjectId(id));
-
-  if (stationObjectIds.length === 0) {
-    return res.json({
-      slot: {
-        start: slotStart.toISOString(),
-        end: slotEnd.toISOString(),
-        durationMinutes: duration,
-      },
-      stations: [],
-    });
-  }
-
-  const stationFilter = { _id: { $in: stationObjectIds } };
-  if (stationObjectId) {
-    stationFilter._id = stationObjectId;
-  }
-  if (stationStatus) stationFilter.status = stationStatus;
-
-  const stations = await Station.find(stationFilter)
-    .select("_id name lat lng status")
-    .lean();
-
-  if (stations.length === 0) {
-    return res.json({
-      slot: {
-        start: slotStart.toISOString(),
-        end: slotEnd.toISOString(),
-        durationMinutes: duration,
-      },
-      stations: [],
-    });
-  }
-
-  const allowedStationIds = new Set(stations.map((st) => st._id.toString()));
-
-  const connectorsByStation = new Map();
-  availableConnectors.forEach((conn) => {
-    const stationIdStr = conn.stationId.toString();
-    if (!allowedStationIds.has(stationIdStr)) return;
-    if (!connectorsByStation.has(stationIdStr)) {
-      connectorsByStation.set(stationIdStr, []);
-    }
-    connectorsByStation.get(stationIdStr).push(conn);
-  });
-
-  const tariffCache = new Map();
-  const tariffLookups = [];
-
-  connectorsByStation.forEach((connectorList, stationIdStr) => {
-    connectorList.forEach((conn) => {
-      const key = `${stationIdStr}_${conn.type}`;
-      if (tariffCache.has(key)) return;
-      tariffCache.set(key, null);
-      tariffLookups.push({ key, stationId: conn.stationId, connectorType: conn.type });
-    });
-  });
-
-  await Promise.all(
-    tariffLookups.map(async ({ key, stationId: stId, connectorType }) => {
-      const tariff = await Tariff.findEffectiveAt(stId, connectorType, slotStart);
-      tariffCache.set(key, tariff || null);
-    })
-  );
-
-  const stationMap = new Map(stations.map((st) => [st._id.toString(), st]));
-
-  const stationsPayload = [];
-
-  connectorsByStation.forEach((connectorList, stationIdStr) => {
-    const station = stationMap.get(stationIdStr);
-    if (!station) return;
-
-    const connectorsPayload = connectorList.map((conn) => {
-      const key = `${stationIdStr}_${conn.type}`;
-      const tariff = tariffCache.get(key);
-      const pricing = tariff
-        ? {
-            pricePerMin: tariff.pricePerMin,
-            pricePerKwh: tariff.pricePerKwh,
-            idleFeePerMin: tariff.idleFeePerMin,
-            currency: "VND",
-            mode: tariff.mode,
-          }
-        : null;
-
-      return {
-        id: conn._id,
-        code: conn.code,
-        type: conn.type,
-        powerKw: conn.powerKw,
-        pricing,
-      };
-    });
-
-    stationsPayload.push({
-      id: station._id,
-      name: station.name,
-      lat: station.lat,
-      lng: station.lng,
-      status: station.status,
-      availableConnectorCount: connectorsPayload.length,
-      availableConnectors: connectorsPayload,
-    });
-  });
+  const availableConnectors = await Connector.aggregate(pipeline);
 
   res.json({
-    slot: {
-      start: slotStart.toISOString(),
-      end: slotEnd.toISOString(),
-      durationMinutes: duration,
-    },
-    stations: stationsPayload,
+    message: "Available connectors retrieved successfully",
+    startTime: start.toISOString(),
+    endTime: endTime.toISOString(),
+    durationMinutes: duration,
+    filters: { connectorType, stationId, stationStatus, chargerId },
+    availableConnectors,
   });
 });
-
 /* ============================================================================
  * Delete station
  * ==========================================================================*/

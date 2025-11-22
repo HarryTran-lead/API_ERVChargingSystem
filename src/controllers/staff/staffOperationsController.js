@@ -1352,7 +1352,20 @@ pipeline.push({
         { $sort: sortSpec },
         { $skip: skip },
         { $limit: pageSize },
-        { $project: { session: 0 } },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'user_id',
+            foreignField: 'id',
+            as: 'user',
+          },
+        },
+        { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            session: 0,
+          },
+        },
       ],
     },
   });
@@ -1366,7 +1379,22 @@ pipeline.push({
 
   const [result] = await Invoice.aggregate(pipeline);
   const total = result?.total || 0;
-  const items = (result?.items || []).map((invoice) => formatInvoiceDates(invoice));
+  const items = (result?.items || []).map((invoice) => {
+    const formatted = formatInvoiceDates(invoice);
+    // Format user object
+    if (formatted.user && formatted.user.id) {
+      formatted.user = {
+        id: formatted.user.id,
+        name: formatted.user.name,
+        fullName: formatted.user.fullName,
+        email: formatted.user.email,
+        phone: formatted.user.phone,
+      };
+    } else {
+      formatted.user = null;
+    }
+    return formatted;
+  });
 
   res.json({
     pagination: {
