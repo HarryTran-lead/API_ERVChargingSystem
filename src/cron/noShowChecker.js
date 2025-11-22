@@ -5,13 +5,28 @@ const Connector = require("../models/Connector");
 const { BOOKING_STATUS } = require("../constants/enums");
 
 /**
+ * Lấy thời gian hiện tại ở giờ Việt Nam (UTC+7)
+ */
+const getNowInVietnamTime = () => {
+  const now = new Date();
+  // Offset Việt Nam: UTC+7 = 7 * 60 * 60 * 1000 ms
+  const vietnamTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+  return vietnamTime;
+};
+
+/**
  * Kiểm tra và cập nhật các booking RESERVED đã quá hạn checkInDeadline
  * Chuyển chúng sang NO_SHOW và release connector về IDLE
  */
 const checkAndMarkOverdueBookings = async () => {
   try {
-    const now = new Date();
-    console.log(`[NoShowChecker] Starting check at ${now.toISOString()}`);
+    const now = getNowInVietnamTime();
+    const vietnamTimeStr = new Date(
+      now.getTime() - 7 * 60 * 60 * 1000
+    ).toISOString();
+    console.log(
+      `[NoShowChecker] Starting check at Vietnam Time: ${vietnamTimeStr.replace("Z", "+07:00")} (UTC: ${new Date().toISOString()})`
+    );
 
     // Tìm tất cả RESERVED booking có checkInDeadline < now
     const overdueBookings = await Booking.find({

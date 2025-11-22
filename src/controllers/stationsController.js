@@ -54,6 +54,8 @@ exports.listStations = asyncHandler(async (req, res) => {
 
   if (status) filter.status = status;
 
+  let query = Station.find(filter);
+
   if (near) {
     // near = "lat,lng"
     const [lat, lng] = near.split(",").map(Number);
@@ -64,10 +66,12 @@ exports.listStations = asyncHandler(async (req, res) => {
           $maxDistance: Number(radiusKm) * 1000,
         },
       };
+      // MongoDB 5.0+ requires sort() with $near operator
+      query = Station.find(filter).sort({ location: 1 });
     }
   }
 
-  const docs = await Station.find(filter)
+  const docs = await query
     .skip((Number(page) - 1) * Number(limit))
     .limit(Number(limit))
     .lean();
@@ -122,6 +126,7 @@ exports.listStationsWithAssets = asyncHandler(async (req, res) => {
   }
 
   // Near search
+  let query = Station.find(filter);
   if (near) {
     const [lat, lng] = near.split(",").map(Number);
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
@@ -131,15 +136,14 @@ exports.listStationsWithAssets = asyncHandler(async (req, res) => {
           $maxDistance: Number(radiusKm) * 1000,
         },
       };
+      // MongoDB 5.0+ requires sort() with $near operator
+      query = Station.find(filter).sort({ location: 1 });
     }
   }
 
   // Pagination
   const skip = (Number(page) - 1) * Number(limit);
-  const stations = await Station.find(filter)
-    .skip(skip)
-    .limit(Number(limit))
-    .lean();
+  const stations = await query.skip(skip).limit(Number(limit)).lean();
 
   if (stations.length === 0) {
     return res.json({
