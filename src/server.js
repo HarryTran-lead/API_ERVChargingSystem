@@ -18,6 +18,7 @@ const server = http.createServer(app);
 // socket.io
 setupSocketServer(server);
 require("./cron/dailyAIReport");
+require("./cron/autoResetConnectors");
 // connect DB
 connectDB();
 
